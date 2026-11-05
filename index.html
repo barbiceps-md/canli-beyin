@@ -1,0 +1,78 @@
+<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<!-- Gövde aşağıda; stil beyin.css, kod beyin.js, veri veri.js (uret.py üretir). Dış kaynak yok: kütüphane, yazı tipi, istek. -->
+<title>Canlı Beyin</title>
+<link rel="stylesheet" href="beyin.css">
+
+<canvas id="tuval" aria-label="Hafızanın 3B nöron haritası: dokun, sürükle, iki parmakla yakınlaştır"></canvas>
+
+<header class="kunye">
+  <div class="ad">
+    <h1>Canlı Beyin</h1>
+    <p id="durum"><span class="nabiz"></span>yükleniyor…</p>
+  </div>
+  <div class="dugmeler">
+    <button class="yuvarlak" id="dAra" aria-label="Hafızada ara">Ara</button>
+    <button class="yuvarlak" id="dIs" aria-label="Açık işler">İşler <b id="isSay">0</b></button>
+    <button class="yuvarlak simge" id="dGorunum" aria-label="Yörünge görünümüne geç"></button>
+  </div>
+</header>
+<nav class="lejant" id="lejant" aria-label="Alanlar"></nav>
+
+<footer class="alt">
+  <div class="zaman">
+    <button class="yuvarlak" id="dOyna" aria-label="Hafızanın büyümesini oynat">▶</button>
+    <input type="range" id="gun" min="0" max="1" step="1" value="1" aria-label="Zaman yolculuğu">
+    <output id="gunYazi" for="gun"></output>
+  </div>
+  <p class="altyazi" id="altyazi">kalıcı hafıza · konfokal görünüm</p>
+</footer>
+<button class="yuvarlak simge" id="dTam" aria-label="Tam ekran"></button>
+<div class="tur" id="tur"><p class="tur-ust"><i id="turRenk"></i><span id="turUst"></span></p><h2 id="turBaslik"></h2><p class="tur-olcu" id="turOlcu"></p></div>
+
+<section class="sayfa kapali" id="sayfa" aria-live="polite">
+  <div class="tutamak"></div>
+  <h2 id="sBaslik"></h2>
+  <div class="etiketler" id="sEtiket"></div>
+  <div class="olcu" id="sOlcu"></div>
+  <div class="komsular" id="sKomsu"></div>
+  <div class="sis" id="sIs" hidden></div>
+  <div class="eylem">
+    <button id="sKapat">Kapat</button>
+    <button id="sYaklas" hidden>Yaklaş</button>
+    <button class="ana" id="sOku">Oku</button>
+  </div>
+</section>
+
+<section class="katman" id="katOku" hidden>
+  <header>
+    <button class="yuvarlak" id="okuGeri" aria-label="Geri">←</button>
+    <h3 id="okuBaslik"></h3>
+    <button class="yuvarlak" id="okuGoster">Beyinde</button>
+  </header>
+  <div class="govde" id="okuGovde"><div class="bolumler" id="okuBolum"></div><article class="icerik" id="okuIcerik"></article></div>
+</section>
+
+<section class="katman" id="katAra" hidden>
+  <header>
+    <button class="yuvarlak" id="araGeri" aria-label="Geri">←</button>
+    <h3>Hafızada ara</h3>
+  </header>
+  <div class="govde">
+    <input class="ara-kutu" id="araKutu" type="search" placeholder="kelime yaz — Türkçe harf fark etmez" autocomplete="off" enterkeyhint="search">
+    <p class="bilgi" id="araBilgi">Canlı sayfalar ve arşiv birlikte aranır.</p>
+    <div id="araSonuc"></div>
+  </div>
+</section>
+
+<section class="katman" id="katIs" hidden>
+  <header>
+    <button class="yuvarlak" id="isGeri" aria-label="Geri">←</button>
+    <h3>Açık işler ve son bitenler</h3>
+  </header>
+  <div class="govde" id="isGovde"></div>
+</section>
+
+<script src="veri.js"></script>
+<script src="beyin.js"></script>
+
+</body></html>

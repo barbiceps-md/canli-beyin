@@ -1,0 +1,41 @@
+{
+  "baslangic": "2026-08-21",
+  "cekirdek": [
+    "index",
+    "ilkeler",
+    "guncel"
+  ],
+  "gunes": "index",
+  "nabiz": "guncel",
+  "alanlar": [
+    {
+      "anahtar": "cekirdek",
+      "ad": "Çekirdek"
+    },
+    {
+      "anahtar": "kitap",
+      "ad": "Kitaplar"
+    },
+    {
+      "anahtar": "mutfak",
+      "ad": "Mutfak"
+    },
+    {
+      "anahtar": "seyahat",
+      "ad": "Seyahat"
+    },
+    {
+      "anahtar": "bahce",
+      "ad": "Bahçe"
+    },
+    {
+      "anahtar": "yazilim",
+      "ad": "Yazılım"
+    },
+    {
+      "anahtar": "saglik",
+      "ad": "Sağlık ve spor"
+    }
+  ],
+  "gizle": []
+}

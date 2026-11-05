@@ -1,0 +1,62 @@
+[
+  {
+    "no": 1,
+    "baslik": "Lizbon konaklamasını ayarla",
+    "durum": "sende",
+    "oncelik": true,
+    "son": "2026-11-04",
+    "sayfa": "lizbon-plani",
+    "ozet": "Alfama mı Graça mı; tramvay hattına yakın olsun."
+  },
+  {
+    "no": 2,
+    "baslik": "Ekşi maya: buz küpü ile buhar denemesi",
+    "durum": "sende",
+    "son": "2026-11-01",
+    "sayfa": "eksi-maya"
+  },
+  {
+    "no": 3,
+    "baslik": "Sunucuya gece yedeği kur",
+    "durum": "bende",
+    "oncelik": true,
+    "son": "2026-10-30",
+    "sayfa": "ev-sunucusu",
+    "ozet": "03:00'te notlar + fotoğraflar; sonra geri yükleme denemesi."
+  },
+  {
+    "no": 4,
+    "baslik": "Kompostu kurut",
+    "durum": "sende",
+    "son": "2026-11-03",
+    "sayfa": "kompost"
+  },
+  {
+    "no": 5,
+    "baslik": "Gökyüzü Atlası'nı bitir",
+    "durum": "sende",
+    "son": "2026-10-05",
+    "sayfa": "okuma-listesi"
+  },
+  {
+    "no": 6,
+    "baslik": "Kışlık marul ekimi",
+    "durum": "sende",
+    "son": "2026-11-02",
+    "sayfa": "balkon-bahcesi"
+  },
+  {
+    "no": 7,
+    "baslik": "Harici diskin garantisi (satıcıdan yanıt)",
+    "durum": "dista",
+    "son": "2026-10-10",
+    "sayfa": "yedekleme"
+  },
+  {
+    "no": 8,
+    "baslik": "Mart: domates fidesi",
+    "durum": "askida",
+    "son": "2026-09-08",
+    "sayfa": "tohum-takvimi"
+  }
+]
