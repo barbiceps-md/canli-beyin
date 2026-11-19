@@ -9,7 +9,7 @@
     --cizgi: #24303C;
     --metin: #E4E9EE;
     --metin-2: #95A3B1;
-    --metin-3: #66727E;
+    --metin-3: #7E8A96;   /* #06090D zeminde 5,4:1 — küçük yazıda da WCAG AA */
     --vurgu: #F1C878;
     --uyari: #F3A35C;
     /* alan renkleri veriden ya da beyin.js'teki sıralı paletten gelir; isteyen burada --a-<alan anahtarı> ile ezer */
@@ -21,7 +21,8 @@
     --f-veri: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     color-scheme: dark;
   }
-  html, body { height: 100%; }
+  html, body { height: 100%; margin: 0; padding: 0; }
+  *, *::before, *::after { box-sizing: border-box; }
   [hidden] { display: none !important; }   /* .katman { display: flex } gizli katmanı ezmesin (barındırıcının stiline güvenme) */
   body {
     background-color: var(--zemin);
@@ -152,7 +153,15 @@
   @keyframes parla { 0% { background: rgba(241, 200, 120, .35); } 100% { background: transparent; } }
   .bolumler { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 10px; margin-bottom: 6px; border-bottom: 1px solid var(--cizgi); }
   .bolumler button { flex: none; font-size: .72rem; padding: 6px 10px; border-radius: 14px; background: var(--zemin-2); color: var(--metin-2); white-space: nowrap; }
-  .bos { padding: 40px 0; text-align: center; color: var(--metin-2); line-height: 1.6; }
+  .bos { padding: 40px 16px; text-align: center; color: var(--metin-2); line-height: 1.6; }
+  noscript .bos, .bos.ortada { position: fixed; inset: 30% 0 auto; z-index: 5; }
+  /* geniş ekranda ayrıntı sayfası sağda yüzen bir kart: tuvalin ortası açık kalır */
+  @media (min-width: 960px) and (min-height: 560px) {
+    .sayfa { left: auto; right: 20px; bottom: calc(var(--alt-h, 112px) + 8px); width: 400px; max-height: calc(100% - var(--alt-h, 112px) - 130px);
+      border: 1px solid var(--cizgi); border-radius: 18px; padding-bottom: 18px; }
+    .sayfa.kapali { transform: translateX(calc(100% + 40px)); }
+    .tutamak { display: none; }
+  }
 
   /* Yörünge görünümü (30 Eki): derin uzay zemini; görünüm değişirken tuval kısa bir geçişle söner ve belirir */
   body.yorunge { background-color: #030509; background-image: radial-gradient(ellipse 80% 55% at 50% 47%, #0A1220, transparent 74%); }

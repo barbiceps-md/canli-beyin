@@ -1,40 +1,50 @@
-<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
-<!-- Gövde aşağıda; stil beyin.css, kod beyin.js, veri veri.js (uret.py üretir). Dış kaynak yok: kütüphane, yazı tipi, istek. -->
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="description" content="Canlı Beyin — Markdown notlarını ve Claude Code hafızasını 3B nöron ağı ya da güneş sistemi olarak gösteren tek sayfa.">
+<meta name="theme-color" content="#06090D">
+<meta name="color-scheme" content="dark">
 <title>Canlı Beyin</title>
+<!-- Stil beyin.css, kod beyin.js, veri veri.js (canli/uret.py üretir). Dış kaynak yok: kütüphane, yazı tipi, ağ isteği. -->
 <link rel="stylesheet" href="beyin.css">
-
-<canvas id="tuval" aria-label="Hafızanın 3B nöron haritası: dokun, sürükle, iki parmakla yakınlaştır"></canvas>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%2306090D'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%23F1C878'/%3E%3Ccircle cx='7' cy='11' r='2.5' fill='%2378AEFF'/%3E%3Ccircle cx='24' cy='22' r='3' fill='%23FF7A98'/%3E%3Ccircle cx='23' cy='8' r='2' fill='%2352D6C6'/%3E%3C/svg%3E">
+</head>
+<body>
+<canvas id="tuval" aria-label="Hafızanın 3B nöron haritası: dokun, sürükle, iki parmakla yakınlaştır. Klavye: oklar döndürür, + ve − yakınlaştırır, / arama açar."></canvas>
+<noscript><p class="bos">Canlı Beyin çizim için JavaScript ister. Notları yine de <code>veri.js</code> içinde ya da kaynak klasörde okuyabilirsin.</p></noscript>
 
 <header class="kunye">
   <div class="ad">
     <h1>Canlı Beyin</h1>
-    <p id="durum"><span class="nabiz"></span>yükleniyor…</p>
+    <p id="durum" aria-live="polite"><span class="nabiz"></span>yükleniyor…</p>
   </div>
   <div class="dugmeler">
-    <button class="yuvarlak" id="dAra" aria-label="Hafızada ara">Ara</button>
+    <button class="yuvarlak" id="dAra" aria-label="Hafızada ara (kısayol: /)" aria-keyshortcuts="/">Ara</button>
     <button class="yuvarlak" id="dIs" aria-label="Açık işler">İşler <b id="isSay">0</b></button>
     <button class="yuvarlak simge" id="dGorunum" aria-label="Yörünge görünümüne geç"></button>
   </div>
 </header>
-<nav class="lejant" id="lejant" aria-label="Alanlar"></nav>
+<nav class="lejant" id="lejant" aria-label="Alanlar — birine bas, o alan öne çıksın"></nav>
 
 <footer class="alt">
   <div class="zaman">
     <button class="yuvarlak" id="dOyna" aria-label="Hafızanın büyümesini oynat">▶</button>
-    <input type="range" id="gun" min="0" max="1" step="1" value="1" aria-label="Zaman yolculuğu">
+    <input type="range" id="gun" min="0" max="1" step="1" value="1" aria-label="Zaman yolculuğu: hafızanın o günkü hâli">
     <output id="gunYazi" for="gun"></output>
   </div>
   <p class="altyazi" id="altyazi">kalıcı hafıza · konfokal görünüm</p>
 </footer>
 <button class="yuvarlak simge" id="dTam" aria-label="Tam ekran"></button>
-<div class="tur" id="tur"><p class="tur-ust"><i id="turRenk"></i><span id="turUst"></span></p><h2 id="turBaslik"></h2><p class="tur-olcu" id="turOlcu"></p></div>
+<div class="tur" id="tur" aria-hidden="true"><p class="tur-ust"><i id="turRenk"></i><span id="turUst"></span></p><h2 id="turBaslik"></h2><p class="tur-olcu" id="turOlcu"></p></div>
 
-<section class="sayfa kapali" id="sayfa" aria-live="polite">
+<section class="sayfa kapali" id="sayfa" aria-live="polite" aria-labelledby="sBaslik">
   <div class="tutamak"></div>
   <h2 id="sBaslik"></h2>
   <div class="etiketler" id="sEtiket"></div>
   <div class="olcu" id="sOlcu"></div>
-  <div class="komsular" id="sKomsu"></div>
+  <div class="komsular" id="sKomsu" aria-label="Bağlı notlar"></div>
   <div class="sis" id="sIs" hidden></div>
   <div class="eylem">
     <button id="sKapat">Kapat</button>
@@ -43,36 +53,36 @@
   </div>
 </section>
 
-<section class="katman" id="katOku" hidden>
+<section class="katman" id="katOku" role="dialog" aria-modal="true" aria-labelledby="okuBaslik" hidden>
   <header>
     <button class="yuvarlak" id="okuGeri" aria-label="Geri">←</button>
     <h3 id="okuBaslik"></h3>
     <button class="yuvarlak" id="okuGoster">Beyinde</button>
   </header>
-  <div class="govde" id="okuGovde"><div class="bolumler" id="okuBolum"></div><article class="icerik" id="okuIcerik"></article></div>
+  <div class="govde" id="okuGovde"><nav class="bolumler" id="okuBolum" aria-label="Bölümler"></nav><article class="icerik" id="okuIcerik"></article></div>
 </section>
 
-<section class="katman" id="katAra" hidden>
+<section class="katman" id="katAra" role="dialog" aria-modal="true" aria-labelledby="araBaslik" hidden>
   <header>
     <button class="yuvarlak" id="araGeri" aria-label="Geri">←</button>
-    <h3>Hafızada ara</h3>
+    <h3 id="araBaslik">Hafızada ara</h3>
   </header>
   <div class="govde">
-    <input class="ara-kutu" id="araKutu" type="search" placeholder="kelime yaz — Türkçe harf fark etmez" autocomplete="off" enterkeyhint="search">
-    <p class="bilgi" id="araBilgi">Canlı sayfalar ve arşiv birlikte aranır.</p>
+    <input class="ara-kutu" id="araKutu" type="search" placeholder="kelime yaz — Türkçe harf fark etmez" autocomplete="off" enterkeyhint="search" aria-label="Aranacak kelime" aria-describedby="araBilgi">
+    <p class="bilgi" id="araBilgi" aria-live="polite">Bütün notlar birlikte aranır.</p>
     <div id="araSonuc"></div>
   </div>
 </section>
 
-<section class="katman" id="katIs" hidden>
+<section class="katman" id="katIs" role="dialog" aria-modal="true" aria-labelledby="isBaslik" hidden>
   <header>
     <button class="yuvarlak" id="isGeri" aria-label="Geri">←</button>
-    <h3>Açık işler ve son bitenler</h3>
+    <h3 id="isBaslik">Açık işler ve son bitenler</h3>
   </header>
   <div class="govde" id="isGovde"></div>
 </section>
 
 <script src="veri.js"></script>
 <script src="beyin.js"></script>
-
-</body></html>
+</body>
+</html>

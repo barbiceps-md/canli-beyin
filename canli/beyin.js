@@ -2,10 +2,13 @@
   "use strict";
   const V = window.BEYIN;
   const $ = (id) => document.getElementById(id);
-  if (!V) {
-    $("durum").textContent = "Veri yüklenemedi — veri.js bulunamadı ya da bozuk.";
+  if (!V || !Array.isArray(V.dugumler) || !V.dugumler.length) {
+    $("durum").textContent = V ? "Veride hiç not yok — uret.py'yi notlarının klasörüyle çalıştır." : "Veri yüklenemedi — veri.js bulunamadı ya da bozuk.";
     return;
   }
+  // eksik alanlar (eski ya da elle yazılmış veri.js) sayfayı düşürmesin
+  V.alanlar = V.alanlar || []; V.kenarlar = V.kenarlar || []; V.gorevler = V.gorevler || []; V.bitenler = V.bitenler || [];
+  V.istatistik = V.istatistik || {};
 
   // ---------- veri ----------
   const AYLAR = ["Oca", "Şub", "Mar", "Nis", "May", "Haz", "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara"];
@@ -18,19 +21,35 @@
   const PALET = ["#F6DFA4", "#FF7A98", "#FFB45E", "#52D6C6", "#A6E36A", "#78AEFF", "#BC9BF6", "#A9B4C0"];
   const GEZEGEN_SIRA = ["saturn", "mars", "jupiter", "uranus", "dunya", "neptun", "pluton", "venus"];
   const ALAN = {}, ALAN_GEZEGEN = {}, BILINMEYEN = { ad: "Diğer", renk: "#A9B4C0" };
+  // renk veriden gelir: yalnız #RGB / #RRGGBB kabul edilir (style'a ya da HTML'e kaçışsız dize girmesin)
+  const renkMi = (r) => typeof r === "string" && /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(r.trim());
   V.alanlar.forEach(([k, ad, renk, gezegen], i) => {
-    ALAN[k] = { ad, renk: renk || css.getPropertyValue("--a-" + k).trim() || PALET[i % PALET.length] };
-    ALAN_GEZEGEN[k] = gezegen || GEZEGEN_SIRA[i % GEZEGEN_SIRA.length];
+    const cssRenk = css.getPropertyValue("--a-" + k).trim();
+    ALAN[k] = { ad: String(ad == null ? k : ad), renk: renkMi(renk) ? renk.trim() : renkMi(cssRenk) ? cssRenk : PALET[i % PALET.length] };
+    ALAN_GEZEGEN[k] = GEZEGEN_SIRA.includes(gezegen) ? gezegen : GEZEGEN_SIRA[i % GEZEGEN_SIRA.length];
   });
   const alanOf = (k) => ALAN[k] || BILINMEYEN;
-  const hex = (h) => { const n = parseInt(h.replace("#", ""), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+  const hex = (h) => {
+    let x = String(h).replace("#", "");
+    if (x.length === 3) x = x[0] + x[0] + x[1] + x[1] + x[2] + x[2];
+    const n = parseInt(x, 16) || 0; return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  const nokta = (renk, sinif) => { const i = document.createElement("i"); if (sinif) i.className = sinif; i.style.background = renk; return i; };
   const gunSayisi = (iso) => Math.round((Date.parse(iso + "T00:00:00") - Date.parse(V.istatistik.baslangic + "T00:00:00")) / 864e5);
   const kisaTarih = (iso) => { const [y, a, g] = iso.slice(0, 10).split("-").map(Number); return g + " " + AYLAR[a - 1]; };
-  const KATMAN_AD = { cekirdek: "çekirdek · her oturum yüklenir", canli: "canlı sayfa", arsiv: "arşiv · uzun süreli bellek" };
+  const KATMAN_AD = { cekirdek: "çekirdek · her oturum yüklenir", canli: "konu sayfası · aranır", arsiv: "arşiv · uzun süreli bellek",
+    noron: "nöron · mesajdaki sözle kendiliğinden gelir" };
+  Object.assign(KATMAN_AD, V.katmanAd || {});
+  const NT_AD = { kural: "kural", ders: "ders (tuzak)", olgu: "olgu" };
+  const NORONLU = V.dugumler.some((d) => d.katman === "noron");   // Beyin v4 kasası mı, düz not klasörü mü
+  // Beyin v4 (11 Kas): nöron = kural/ders/olgu kartı; rengi kaynak sayfasının alanından, sert kural (⛔) kırmızıya, olgu soluk
+  const karis3 = (a, b, t) => a.map((v, k) => Math.round(v * (1 - t) + b[k] * t));
+  const noronRgb = (d, r) => d.sert ? karis3(r, [255, 86, 74], .62) : d.nt === "olgu" ? karis3(r, [200, 210, 220], .45) : d.nt === "ders" ? karis3(r, [255, 255, 255], .18) : r;
 
   const D = V.dugumler.map((d, i) => ({
-    ...d, i, rgb: hex(alanOf(d.alan).renk), komsu: [],
-    yaricap: (d.katman === "cekirdek" ? 15 : d.katman === "arsiv" ? 6 : 8) + Math.sqrt(d.karakter) / (d.katman === "arsiv" ? 16 : 11),
+    ...d, i, bolumler: d.bolumler || [], metin: d.metin || "", karakter: d.karakter || 0, ad: d.ad || d.id, baslik: d.baslik || d.ad || d.id, rgb: d.katman === "noron" ? noronRgb(d, hex(alanOf(d.alan).renk)) : hex(alanOf(d.alan).renk), komsu: [],
+    yaricap: d.katman === "noron" ? 2.4 + Math.sqrt(d.karakter) / 34 :
+      (d.katman === "cekirdek" ? 15 : d.katman === "arsiv" ? 6 : 8) + Math.sqrt(d.karakter) / (d.katman === "arsiv" ? 16 : 11),
     gun: gunSayisi(d.dogum), taze: (Date.parse(V.istatistik.bugun) - Date.parse(d.guncelleme)) / 864e5 <= 1,
     px: 0, py: 0, pz: 0, ps: 1, gor: 1, atesle: 0, dalga: 0,
   }));
@@ -44,12 +63,14 @@
   const binlik = (n) => n.toLocaleString("tr-TR");
   function durumYaz() {
     const dk = Math.max(0, Math.round((Date.now() - Date.parse(ist.son_degisim.replace(" ", "T"))) / 6e4));
-    const once = dk < 60 ? dk + " dk önce" : dk < 1440 ? Math.round(dk / 60) + " sa önce" : Math.round(dk / 1440) + " gün önce";
-    $("durum").innerHTML = '<span class="nabiz"></span>' + once + " güncellendi";
+    const once = !isFinite(dk) ? "" : dk < 60 ? dk + " dk önce" : dk < 1440 ? Math.round(dk / 60) + " sa önce"
+      : dk < 7 * 1440 ? Math.round(dk / 1440) + " gün önce" : kisaTarih(ist.son_degisim) + " " + ist.son_degisim.slice(0, 4) + "'te";
+    const n = document.createElement("span"); n.className = "nabiz";
+    $("durum").replaceChildren(n, document.createTextNode(once ? once + " güncellendi" : "hafıza"));
   }
   durumYaz(); setInterval(durumYaz, 60000);
-  const NORAL_ALTYAZI = ist.noron + " nöron · " + ist.sinaps + " sinaps · " + binlik(Math.round(ist.karakter / 1000)) +
-    " bin karakter · " + (ist.oturum ? ist.oturum + " oturum · " : "") + ist.gun + " gün · nöron boyu = bilgi";
+  const NORAL_ALTYAZI = ist.noron + " nöron · " + (ist.sayfa ? ist.sayfa + " sayfa · " : "") + ist.sinaps + " sinaps · " +
+    binlik(Math.round(ist.karakter / 1000)) + " bin karakter · " + (ist.oturum ? ist.oturum + " oturum · " : "") + ist.gun + " gün";
   $("altyazi").textContent = NORAL_ALTYAZI;
   document.documentElement.lang = "tr";   // büyük harfe çevrilen yazılarda i → İ (SİNAPS, AÇIK İŞLER)
   const acik = V.gorevler.filter((g) => g.durum !== "askida").length;
@@ -61,8 +82,7 @@
     if (!D.some((d) => d.alan === k)) continue;
     const b = document.createElement("button");
     b.setAttribute("aria-pressed", "false");
-    b.innerHTML = '<i style="background:' + a.renk + '"></i>';
-    b.appendChild(document.createTextNode(a.ad));   // alan adı veriden gelir: HTML olarak değil, düz yazı olarak
+    b.append(nokta(a.renk), document.createTextNode(a.ad));   // alan adı veriden gelir: HTML olarak değil, düz yazı olarak
     b.addEventListener("click", () => {
       vurguAlan = vurguAlan === k ? null : k;
       for (const x of $("lejant").children) x.setAttribute("aria-pressed", "false");
@@ -115,7 +135,7 @@
   const egimSinir = () => (gorunum === "yorunge" ? [-1.5, .5] : [-1.25, 1.25]);
   function izdus() {
     const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
-    const olcek = Math.min(W, H * 0.62) * 0.27 * yakin, ox = W / 2, oy = H * 0.48;
+    const olcek = Math.min(W, H * (W > H ? 0.95 : 0.62)) * 0.27 * yakin, ox = W / 2, oy = H * 0.48;   // yatay ekranda yükseklik daha cömert
     for (const d of D) {
       const [x, y, z] = d.konum;
       const x1 = x * cy + z * sy, z1 = -x * sy + z * cy;
@@ -135,17 +155,29 @@
     cx.lineCap = "round";
     const odak = secili ? new Set([secili, ...secili.komsu]) : null;
     // sinapslar
+    // (Beyin v4: yüzlerce sinaps) aynı renk + saydamlıktaki çizgiler tek yolda toplanır — her çizgiye ayrı stroke
+    // yazılım çizimde kare hızını yarıya indiriyordu; saydamlık 0,01 adımına yuvarlanır (göz farkı görmez)
+    const kova = new Map();
     for (const k of K) {
       if (!gorunur(k.a) || !gorunur(k.b)) continue;
       let alfa = 0.05 + 0.05 * Math.min(3, k.n);
       const derin = Math.max(.25, 1 - ((k.a.sz + k.b.sz) / 2 + 1.6) / 3.6);
       alfa *= derin;
-      if (odak) alfa = odak.has(k.a) && odak.has(k.b) && (k.a === secili || k.b === secili) ? .55 : alfa * .25;
+      if (k.a.katman === "noron" || k.b.katman === "noron") alfa *= .7;
+      const kalin = odak && (k.a === secili || k.b === secili);
+      if (odak) alfa = odak.has(k.a) && odak.has(k.b) && kalin ? .55 : alfa * .25;
       if (vurguAlan) alfa = k.a.alan === vurguAlan || k.b.alan === vurguAlan ? alfa * 1.8 : alfa * .25;
-      const [R, G, B] = k.a.rgb;
-      cx.strokeStyle = "rgba(" + R + "," + G + "," + B + "," + alfa.toFixed(3) + ")";
-      cx.lineWidth = odak && (k.a === secili || k.b === secili) ? 1.2 : .55;
-      cx.beginPath(); cx.moveTo(k.a.sx, k.a.sy); cx.lineTo(k.b.sx, k.b.sy); cx.stroke();
+      const r = k.a.katman === "noron" && k.b.katman !== "noron" ? k.b.rgb : k.a.rgb;
+      const anah = r[0] + "," + r[1] + "," + r[2] + "," + (Math.round(alfa * 100) / 100) + (kalin ? "|k" : "");
+      let y = kova.get(anah); if (!y) kova.set(anah, (y = []));
+      y.push(k.a.sx, k.a.sy, k.b.sx, k.b.sy);
+    }
+    for (const [anah, y] of kova) {
+      const [renk, kalin] = anah.split("|");
+      cx.strokeStyle = "rgba(" + renk + ")"; cx.lineWidth = kalin ? 1.2 : .55;
+      cx.beginPath();
+      for (let i = 0; i < y.length; i += 4) { cx.moveTo(y[i], y[i + 1]); cx.lineTo(y[i + 2], y[i + 3]); }
+      cx.stroke();
     }
     // sinyal akışı: sinaps boyunca yavaş süzülen, kuyruğu sönen yumuşak ışık izi (kıvılcım/patlama yok)
     for (let i = darbeler.length - 1; i >= 0; i--) {
@@ -174,7 +206,7 @@
     // nöronlar (arkadan öne)
     const sira = D.filter(gorunur).sort((a, b) => b.sz - a.sz);
     for (const d of sira) {
-      let alfa = Math.max(.18, Math.min(1, 1.15 - (d.sz + 1.6) / 3.8)) * (d.katman === "arsiv" ? .62 : 1);
+      let alfa = Math.max(.18, Math.min(1, 1.15 - (d.sz + 1.6) / 3.8)) * (d.katman === "arsiv" ? .62 : d.katman === "noron" ? .9 : 1);
       if (odak && !odak.has(d)) alfa *= .3;
       if (vurguAlan && d.alan !== vurguAlan) alfa *= .25;
       const dogal = zamanGun < SON_GUN && SON_GUN - 0 > 0 ? Math.min(1, (zamanGun - d.gun + 1) / 2.5) : 1;
@@ -182,14 +214,17 @@
       const ates = 1 + d.atesle * .2;
       // küre yarıçapı (px): bilgi miktarıyla büyür, derinlikle küçülür; 3,2–19 px arası
       // arşiv (uzun süreli bellek) dış halkada daha küçük kalır: metni büyük ama ilgi odağı canlı sayfalar
-      const arsiv = d.katman === "arsiv";
-      const ro = Math.max(3.2, Math.min(arsiv ? 13 : 19, d.yaricap * d.ps * yakin * (arsiv ? .4 : .55))) * nefes * ates * (d === secili ? 1.2 : 1), a = alfa * dogal;
+      const arsiv = d.katman === "arsiv", nor = d.katman === "noron";
+      const ro = Math.max(nor ? 1.6 : 3.2, Math.min(arsiv ? 13 : nor ? 7 : 19, d.yaricap * d.ps * yakin * (arsiv ? .4 : .55))) * nefes * ates * (d === secili ? 1.2 : 1), a = alfa * dogal;
       d.ro = ro;
-      // ışıma: kürenin çevresinde yumuşak, düşük (kümede sis yapmaz); ateşlenince parlar
-      birim(d.sx, d.sy, ro * 2.6);
-      cx.globalCompositeOperation = "lighter";
-      cx.globalAlpha = a * (.55 + d.atesle * .45);
-      cx.fillStyle = d.hale; cx.fillRect(-1, -1, 2, 2);
+      // ışıma: kürenin çevresinde yumuşak, düşük (kümede sis yapmaz); ateşlenince parlar.
+      // Küçük nöronda ışıma yalnız ateşlenince/seçilince (180 ek gradyan dolgusu kare hızını düşürüyordu)
+      if (!nor || d.atesle > .05 || d === secili || ro > 4.5) {
+        birim(d.sx, d.sy, ro * 2.6);
+        cx.globalCompositeOperation = "lighter";
+        cx.globalAlpha = a * (.55 + d.atesle * .45) * (nor ? .7 : 1);
+        cx.fillStyle = d.hale; cx.fillRect(-1, -1, 2, 2);
+      }
       // küre: ışık sol üstten, kenar koyulaşır; yakın olan uzaktakinin önünde (normal karışım)
       birim(d.sx, d.sy, ro);
       cx.globalCompositeOperation = "source-over";
@@ -215,7 +250,8 @@
     else {
       if (secili) aday.push(secili, ...[...secili.komsu].sort((a, b) => b.derece - a.derece));
       aday.push(...D.filter((d) => d.katman === "cekirdek"));
-      if (!odak && yakin > 1.35) aday.push(...[...sira].reverse().filter((d) => d.katman !== "arsiv" && d.ps > .95));
+      if (!odak && yakin > 1.35) aday.push(...[...sira].reverse().filter((d) => d.katman !== "arsiv" && d.katman !== "noron" && d.ps > .95));
+      if (!odak && yakin > 2.6) aday.push(...[...sira].reverse().filter((d) => d.katman === "noron" && d.ps > 1.05));
     }
     const kutular = [], cizildi = new Set();
     for (const d of aday) {
@@ -276,11 +312,11 @@
   const gunes = ID[AYAR.gunes] || [...yildizlar].sort((a, b) => b.karakter - a.karakter)[0] || null;
   for (const d of D) {
     const es = d.katman === "arsiv" && d.id.endsWith("-gecmis") ? ID[d.id.slice(0, -7)] : null;
-    d.tur = d.katman === "cekirdek" ? "yildiz" : d.katman !== "arsiv" ? "gezegen" : es && es.katman !== "arsiv" ? "ay" : "kuyruklu";
-    d.ebeveyn = d.tur === "ay" ? es : null;
+    d.tur = d.katman === "noron" ? "noron" : d.katman === "cekirdek" ? "yildiz" : d.katman !== "arsiv" ? "gezegen" : es && es.katman !== "arsiv" ? "ay" : "kuyruklu";
+    d.ebeveyn = d.tur === "ay" ? es : d.tur === "noron" ? (ID[d.kaynak] && ID[d.kaynak].katman !== "noron" ? ID[d.kaynak] : null) : null;
     // dünya biriminde yarıçap: boy = bilgi (karekökle; en büyük gezegen en küçüğün ~2 katı)
     const k = Math.sqrt(d.karakter);
-    d.yR = d === gunes ? .12 : d.tur === "yildiz" ? .056 + k / 6000 : d.tur === "gezegen" ? .034 + k / 2100 : d.tur === "ay" ? .016 + k / 8000 : .018 + k / 13000;
+    d.yR = d === gunes ? .12 : d.tur === "yildiz" ? .056 + k / 6000 : d.tur === "gezegen" ? .034 + k / 2100 : d.tur === "ay" ? .016 + k / 8000 : d.tur === "noron" ? .0045 + k / 40000 : .018 + k / 13000;
     // yıldızlar 21 Ağu'dan beri var (çekirdeğin doğum tarihi sayfa metnindeki en eski tarihten hesaplanıyor, geç kalıyor)
     d.wx = d.wy = d.wz = 0; d.yGun = d.tur === "yildiz" ? 0 : d.gun; d.lfi = 0; d.ls = 0; d.lz = 0;
   }
@@ -303,6 +339,20 @@
     d.yo = { a: e.yR * 1.9 + .032 + k * .03, egim: (g() - .5) * 1.1, dugum: g() * TAM, faz: g() * TAM, sn: 15 + k * 7 + g() * 4 };
     e.yGun = Math.min(e.yGun, d.gun);   // ayı gezegeninden önce doğduysa gezegen ayıyla birlikte belirir
   }
+  // nöron kuşağı (Beyin v4, 11 Kas): her nöron kaynak sayfasının (gezegenin) çevresinde ince bir asteroit kuşağında döner;
+  // kaynağı gezegen değilse güneşin çevresinde. Kuşak düzlemi gezegen başına bir kez seçilir, nöronlar ona hafifçe saçılır.
+  const kusak = D.filter((d) => d.tur === "noron");
+  const kusakSay = {}, kusakNo = {};
+  for (const d of kusak) { d.ebeveyn = d.ebeveyn || gunes; if (d.ebeveyn) kusakSay[d.ebeveyn.id] = (kusakSay[d.ebeveyn.id] || 0) + 1; }
+  for (const d of kusak) {
+    const e = d.ebeveyn;
+    if (!e) { d.yo = { a: 0, egim: 0, dugum: 0, faz: 0, sn: 1 }; continue; }
+    const n = kusakSay[e.id], j = (kusakNo[e.id] = (kusakNo[e.id] || 0) + 1) - 1, g = rastgele("kusak:" + d.id);
+    if (!e.kusak) { const ge = rastgele("kusakDuz:" + e.id); e.kusak = { egim: (ge() - .5) * .6, dugum: ge() * TAM }; }
+    d.yo = { a: e.yR * 1.6 + .02 + (j % 3) * .007 + g() * .005, egim: e.kusak.egim + (g() - .5) * .1, dugum: e.kusak.dugum,
+      faz: j / n * TAM + g() * .25, sn: 28 + g() * 12 };
+    d.yGun = Math.max(d.yGun, e.yGun);   // nöron kaynağından önce görünmez
+  }
   // kuyruklu yıldızlar: basık yörünge, güneşe yaklaşınca hızlanır (Kepler denklemi); en taze kayıt en içte
   const kuyrukluar = D.filter((d) => d.tur === "kuyruklu").sort((a, b) => b.guncelleme.localeCompare(a.guncelleme) || a.id.localeCompare(b.id));
   kuyrukluar.forEach((d, i) => {
@@ -320,8 +370,9 @@
       wx: 0, wy: 0, wz: 0, sx: 0, sy: 0, sz: 0, ps: 1, ekranda: false });
   }
   const YORUNGE_ALTYAZI = [[yildizlar.length, "yıldız"], [yorungeler.reduce((s, o) => s + o.gezegenler.length, 0), "gezegen"], [aylar.length, "ay"],
-    [kuyrukluar.length, "kuyruklu yıldız"], [uydular.length, "uydu (açık iş)"]].filter(([n]) => n).map(([n, s]) => n + " " + s).join(" · ") + " · boy = bilgi";
-  const turAd = (d) => d.tur === "yildiz" ? (d === gunes ? "güneş · çekirdek" : "eş yıldız · çekirdek")
+    [kuyrukluar.length, "kuyruklu yıldız"], [uydular.length, "uydu (açık iş)"], [kusak.length, "nöron (kuşak)"]].filter(([n]) => n).map(([n, s]) => n + " " + s).join(" · ") + " · boy = bilgi";
+  const turAd = (d) => d.tur === "noron" ? "nöron · " + (NT_AD[d.nt] || d.nt) + (d.sert ? " · sert kural" : "") + (d.gecersiz ? " · yerine geçildi" : "") + " · kuşakta"
+    : d.tur === "yildiz" ? (d === gunes ? "güneş · çekirdek" : "eş yıldız · çekirdek")
     : d.tur === "gezegen" ? "gezegen · " + d.doku.ad + " esintili" : d.tur === "ay" ? "ay · " + d.doku.ad + " esintili · geçmiş" : "kuyruklu yıldız · kayıt (arşiv)";
 
   // ---------- gerçek gezegen dokuları (30 Eki, 2. tur) ----------
@@ -468,6 +519,7 @@
     }
     // halkalı gezegende aylar ve uydular halkanın dışından dolaşır
     for (const d of aylar) { const T = d.ebeveyn.doku; if (T && (T.halka || T.ince)) d.yo.a += d.ebeveyn.yR * .9; }
+    for (const d of kusak) { const T = d.ebeveyn && d.ebeveyn.doku; if (T && (T.halka || T.ince)) d.yo.a += d.ebeveyn.yR * .9; }
     for (const s of uydular) { const T = s.e.doku; if (T && (T.halka || T.ince)) s.a += s.e.yR * 1.05; }
   }
 
@@ -562,6 +614,10 @@
     for (const s of uydular) {
       const e = s.e, u = s.faz + sn * TAM / s.sn;
       egik(s.a * Math.cos(u), s.a * Math.sin(u), s.egim, s.dugum); s.wx = e.wx + QX; s.wy = e.wy + QY; s.wz = e.wz + QZ;
+    }
+    for (const d of kusak) {
+      const o = d.yo, e = d.ebeveyn || { wx: 0, wy: 0, wz: 0 }, u = o.faz + sn * TAM / o.sn;
+      egik(o.a * Math.cos(u), o.a * Math.sin(u), o.egim, o.dugum); d.wx = e.wx + QX; d.wy = e.wy + QY; d.wz = e.wz + QZ;
     }
   }
   function yIzdus(dt) {
@@ -954,12 +1010,35 @@
     // seçilen gövdenin bağlantıları: güneşin çevresinde kıvrılan rotalar
     if (secili && gorunur(secili)) {
       cx.globalCompositeOperation = "lighter"; cx.lineWidth = .9; cx.strokeStyle = rgba(secili.yRgb, .3);
-      for (const n of secili.komsu) if (gorunur(n)) yolCiz(rotaHazir(secili, n), 24);
+      // gezegen seçiliyken kendi kuşağındaki nöronlara rota çizilmez (kalabalık); nöron seçiliyse bütün bağları
+      for (const n of secili.komsu) if (gorunur(n) && (secili.tur === "noron" || n.tur !== "noron" || n.ebeveyn !== secili)) yolCiz(rotaHazir(secili, n), 24);
     }
     yDarbeler(dt);
     // gövdeler: arkadan öne (yakın olan uzaktakinin önünde)
     const uyduA = Math.max(0, Math.min(1, zamanGun - (SON_GUN - 1.5)));   // açık işler "bugün"e ait: geçmişte görünmez
-    const liste = D.filter((d) => d.ekranda && gorunur(d));
+    // kuşak taşları (nöronlar): renk grubuyla toplu çizilir, gövdelerin arkasında (küçük noktalar; derinlik sırası gözle fark edilmez)
+    const kTas = new Map();
+    for (const d of kusak) {
+      if (!d.ekranda || !gorunur(d) || d === secili || d.dalga > .04 || d.atesle > .05) continue;
+      if (d.sx < -10 || d.sx > W + 10 || d.sy < -10 || d.sy > H + 10) continue;
+      let a = Math.max(.5, Math.min(1, .85 - d.sz * .22));
+      if (odak && !odak.has(d) && !odak.has(d.ebeveyn)) a *= .3;
+      if (vurguAlan && d.alan !== vurguAlan) a *= .25;
+      const dogal = zamanGun >= SON_GUN ? 1 : Math.max(0, Math.min(1, (zamanGun - d.yGun + 1) / 2.5));
+      const ro = Math.max(.9, Math.min(6, d.yR * Yol * d.ps * (.3 + .7 * dogal)));
+      d.ro = ro;
+      const anah = d.yRgb.join(",") + "," + (Math.round(a * .55 * dogal * 20) / 20);
+      let y = kTas.get(anah); if (!y) kTas.set(anah, (y = []));
+      y.push(d.sx, d.sy, ro);
+    }
+    cx.globalCompositeOperation = "lighter";
+    for (const [anah, y] of kTas) {
+      cx.fillStyle = "rgba(" + anah + ")"; cx.beginPath();
+      for (let i = 0; i < y.length; i += 3) { cx.moveTo(y[i] + y[i + 2], y[i + 1]); cx.arc(y[i], y[i + 1], y[i + 2], 0, TAM); }
+      cx.fill();
+    }
+    cx.globalCompositeOperation = "source-over";
+    const liste = D.filter((d) => d.ekranda && gorunur(d) && (d.tur !== "noron" || d === secili || d.dalga > .04 || d.atesle > .05));
     if (uyduA > 0) for (const s of uydular) if (s.ekranda && gorunur(s.e)) liste.push(s);
     liste.sort((a, b) => b.sz - a.sz);
     for (const d of liste) {
@@ -969,9 +1048,20 @@
       if (vurguAlan && sahip.alan !== vurguAlan) a *= .25;
       if (d.uydu) { uyduCiz(d, a * uyduA, t); continue; }
       const dogal = d.tur === "yildiz" || zamanGun >= SON_GUN ? 1 : Math.max(0, Math.min(1, (zamanGun - d.yGun + 1) / 2.5));
-      const ro = Math.max(d.tur === "ay" ? 1.2 : 1.6, Math.min(90, d.yR * Yol * d.ps * (.3 + .7 * dogal) * (d === secili ? 1.15 : 1)));
+      const ro = Math.max(d.tur === "noron" ? .9 : d.tur === "ay" ? 1.2 : 1.6, Math.min(90, d.yR * Yol * d.ps * (.3 + .7 * dogal) * (d === secili ? 1.6 : 1)));
       d.ro = ro;
       if (d.tur !== "kuyruklu" && (d.sx < -ro * 6 || d.sx > W + ro * 6 || d.sy < -ro * 6 || d.sy > H + ro * 6)) continue;
+      if (d.tur === "noron") {   // kuşak taşı: düz, küçük, ışıyan nokta (doku yok); seçiliyse halkayla
+        cx.globalCompositeOperation = "lighter"; cx.globalAlpha = a * (.55 + d.atesle * .45) * dogal;
+        cx.fillStyle = rgba(d.yRgb, 1); cx.beginPath(); cx.arc(d.sx, d.sy, ro, 0, TAM); cx.fill();
+        if (d === secili || d.dalga > .04) {
+          cx.globalCompositeOperation = "source-over"; cx.globalAlpha = a * Math.max(d === secili ? .8 : 0, d.dalga * .7);
+          cx.strokeStyle = rgba(d.yRgb, 1); cx.lineWidth = 1; cx.beginPath(); cx.arc(d.sx, d.sy, ro + 4 + (1 - d.dalga) * 8, 0, TAM); cx.stroke();
+          d.dalga *= .955;
+        }
+        cx.globalCompositeOperation = "source-over"; sifirla(); d.atesle *= .94;
+        continue;
+      }
       if (d.tur === "yildiz") yildizCiz(d, ro, a, t);
       else if (d.tur === "kuyruklu") kuyrukluCiz(d, ro, a);
       else gezegenCiz(d, ro, d.tur === "ay" ? a * .9 : a, t);
@@ -1009,8 +1099,9 @@
       if (secili) aday.push(secili, ...[...secili.komsu].sort((a, b) => b.derece - a.derece));
       if (gunes) aday.push(gunes);   // eş yıldızların adı güneşinkiyle çakışıyor: onlar yakınlaşınca ya da seçilince
       if (yakin > 1.35) aday.push(...esler);
-      if (vurguAlan) aday.push(...liste.filter((d) => !d.uydu && d.alan === vurguAlan).reverse());
-      if (!odak && yakin > 1.35) aday.push(...liste.filter((d) => !d.uydu && d.tur !== "ay").reverse());
+      if (vurguAlan) aday.push(...liste.filter((d) => !d.uydu && d.tur !== "noron" && d.alan === vurguAlan).reverse());
+      if (!odak && yakin > 1.35) aday.push(...liste.filter((d) => !d.uydu && d.tur !== "ay" && d.tur !== "noron").reverse());
+      if (!odak && yakin > 4) aday.push(...liste.filter((d) => d.tur === "noron").reverse());
     }
     const cizildi = new Set();
     for (const d of aday) {
@@ -1087,8 +1178,10 @@
   $("gun").max = SON_GUN; $("gun").value = SON_GUN;
   function gunYaz() {
     const g = Math.floor(zamanGun), t = new Date(Date.parse(ist.baslangic + "T00:00:00") + g * 864e5);
-    const yo = gorunum === "yorunge", say = D.filter((d) => (yo ? d.yGun : d.gun) <= g).length;
-    $("gunYazi").textContent = t.getDate() + " " + AYLAR[t.getMonth()] + " · " + say + (yo ? " gök cismi" : " nöron");
+    const yo = gorunum === "yorunge", dogan = D.filter((d) => (yo ? d.yGun : d.gun) <= g);
+    const nsay = dogan.filter((d) => d.katman === "noron").length;   // v4: "nöron" = kural/ders/olgu kartı; sayfalar ayrı sayılır
+    $("gunYazi").textContent = t.getDate() + " " + AYLAR[t.getMonth()] + " · " + (yo ? dogan.length + " gök cismi"
+      : NORONLU ? nsay + " nöron · " + (dogan.length - nsay) + " sayfa" : dogan.length + " nöron");
   }
   gunYaz();
   $("gun").addEventListener("input", (e) => { oynuyor = false; $("dOyna").textContent = "▶"; zamanGun = +e.target.value; gunYaz(); });
@@ -1175,8 +1268,7 @@
     $("sKomsu").innerHTML = "";
     [...d.komsu].sort((x, y) => y.derece - x.derece).slice(0, 12).forEach((k) => {
       const b = document.createElement("button");
-      b.innerHTML = '<i style="background:' + alanOf(k.alan).renk + '"></i>';
-      b.appendChild(document.createTextNode(k.ad));
+      b.append(nokta(alanOf(k.alan).renk), document.createTextNode(k.ad));
       b.addEventListener("click", () => { sec(k); atesle(k); odakla(k); });
       $("sKomsu").appendChild(b);
     });
@@ -1211,7 +1303,7 @@
       let t = esc(p);
       t = t.replace(/\[\[([^\]|#]+)(?:#([^\]|]+))?(?:\|([^\]]+))?\]\]/g, (m, ad, bas, takma) =>
         '<a href="#" data-git="' + ad.trim() + '"' + (bas ? ' data-bas="' + bas.trim() + '"' : "") + ">" + (takma || ad).trim() + "</a>");
-      t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+      t = t.replace(/\*\*([^*<>"]+)\*\*/g, "<strong>$1</strong>");   // etiket/öznitelik sınırını aşmaz
       t = t.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
       t = t.replace(/&lt;(https?:\/\/[^\s&]+)&gt;/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
       return t;
@@ -1271,10 +1363,31 @@
   // ---------- katmanlar ----------
   const yigin = [];
   // açılan katman en üste: hepsi aynı z-index'teydi, aramadan ya da işlerden açılan okuyucu altta kalıyordu (30 Eki)
-  function katmanAc(id) { $(id).hidden = false; if (yigin[yigin.length - 1] !== id) yigin.push(id); $(id).style.zIndex = 6 + yigin.length; }
-  function katmanKapat() { const id = yigin.pop(); if (id) $(id).hidden = true; }
+  // erişilebilirlik: katman açılınca odak içine (geri düğmesine) gider, kapanınca açan düğmeye döner
+  const odakGeri = [];
+  function katmanAc(id) {
+    const ilk = $(id).hidden;
+    $(id).hidden = false; if (yigin[yigin.length - 1] !== id) yigin.push(id); $(id).style.zIndex = 6 + yigin.length;
+    if (ilk) { odakGeri.push(document.activeElement); const g = $(id).querySelector("header button"); if (g && id !== "katAra") g.focus({ preventScroll: true }); }
+  }
+  function katmanKapat() {
+    const id = yigin.pop(); if (!id) return;
+    $(id).hidden = true;
+    const o = odakGeri.pop(); if (o && o.focus && document.contains(o)) o.focus({ preventScroll: true });
+  }
   for (const id of ["okuGeri", "araGeri", "isGeri"]) $(id).addEventListener("click", katmanKapat);
-  addEventListener("keydown", (e) => { if (e.key === "Escape") { if (yigin.length) katmanKapat(); else if (!secili && tamKip) tamDegistir(); else sec(null); } });
+  addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { if (yigin.length) katmanKapat(); else if (!secili && tamKip) tamDegistir(); else sec(null); return; }
+    const yaziyor = /^(INPUT|TEXTAREA|SELECT)$/.test((e.target && e.target.tagName) || "") || e.ctrlKey || e.metaKey || e.altKey;
+    if (yaziyor || yigin.length) return;
+    // klavyeyle gezinme: / ara · oklar döndür · + − yakınlaştır
+    const [ea, eu] = egimSinir();
+    const adim = { ArrowLeft: [-.12, 0], ArrowRight: [.12, 0], ArrowUp: [0, -.1], ArrowDown: [0, .1] }[e.key];
+    if (e.key === "/") { e.preventDefault(); $("dAra").click(); }
+    else if (adim) { e.preventDefault(); hedef = null; yaw += adim[0]; pitch = Math.max(ea, Math.min(eu, pitch + adim[1])); sonDokunus = performance.now(); }
+    else if (e.key === "+" || e.key === "=") { yakin = Math.min(yakinTavan(), yakin * 1.12); sonDokunus = performance.now(); }
+    else if (e.key === "-" || e.key === "_") { yakin = Math.max(.6, yakin / 1.12); sonDokunus = performance.now(); }
+  });
 
   let okunan = null;
   function oku(id, satir, sorgu) {
@@ -1353,6 +1466,8 @@
     const bas = Math.max(0, i - 50), son = Math.min(s.length, i + n + 70);
     return (bas ? "…" : "") + esc(s.slice(bas, i)) + "<mark>" + esc(s.slice(i, i + n)) + "</mark>" + esc(s.slice(i + n, son)) + (son < s.length ? "…" : "");
   }
+  const ARA_BILGI = NORONLU ? "Nöronlar, konu sayfaları ve arşiv birlikte aranır." : "Bütün notlar ve arşiv birlikte aranır.";
+  $("araBilgi").textContent = ARA_BILGI;
   const eslesir = (k, q, kelimeler) => k.includes(q) || (kelimeler.length > 1 && kelimeler.every((w) => k.includes(w)));
   let araZaman = 0;
   $("araKutu").addEventListener("input", () => { clearTimeout(araZaman); araZaman = setTimeout(ara, 180); });
@@ -1360,10 +1475,11 @@
     const ham = $("araKutu").value.trim(), q = katla(ham);
     const kutu = $("araSonuc");
     kutu.innerHTML = "";
-    if (q.length < 2) { $("araBilgi").textContent = "Canlı sayfalar ve arşiv birlikte aranır."; return; }
+    if (q.length < 2) { $("araBilgi").textContent = ARA_BILGI; return; }
     if (!dizin) dizinKur();
     let toplam = 0, dosya = 0;
-    const sirali = [...dizin].sort((a, b) => ({ cekirdek: 0, canli: 1, arsiv: 2 }[a.d.katman] - { cekirdek: 0, canli: 1, arsiv: 2 }[b.d.katman]));
+    const SIRA = { cekirdek: 0, noron: 1, canli: 2, arsiv: 3 };
+    const sirali = [...dizin].sort((a, b) => (SIRA[a.d.katman] ?? 4) - (SIRA[b.d.katman] ?? 4));
     const kelimeler = q.split(/\s+/).filter(Boolean);
     for (const x of sirali) {
       const isabet = [];
@@ -1373,7 +1489,8 @@
       for (const i of isabet.slice(0, x.d.katman === "arsiv" ? 2 : 3)) {
         const b = document.createElement("button");
         b.className = "sonuc";
-        b.innerHTML = '<div class="ust"><i style="background:' + alanOf(x.d.alan).renk + '"></i><b></b><span></span></div><div class="parca">' + parca(x.satirlar[i], q) + "</div>";
+        b.innerHTML = '<div class="ust"><b></b><span></span></div><div class="parca">' + parca(x.satirlar[i], q) + "</div>";
+        b.querySelector(".ust").prepend(nokta(alanOf(x.d.alan).renk));
         b.querySelector("b").textContent = x.d.ad;
         b.querySelector("span").textContent = x.bol[i] ? "§ " + x.bol[i].replace(/\*\*/g, "") : "";
         b.addEventListener("click", () => oku(x.d.id, i + 1, ham));
@@ -1516,7 +1633,7 @@
     let d = tur.sira.pop();
     while (d && !gorunur(d)) d = tur.sira.pop();   // zaman cetveli geri alındıysa henüz doğmamış olanlar atlanır
     if (!d) {   // hepsi gezildi: yeniden karılır (az önceki başa gelmez)
-      const s = D.filter((x) => gorunur(x) && x !== tur.d);
+      const s = D.filter((x) => gorunur(x) && x !== tur.d && x.katman !== "noron");   // turda nöronlar değil sayfalar gezilir
       for (let i = s.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [s[i], s[j]] = [s[j], s[i]]; }
       tur.sira = s; d = s.pop();
       if (!d) return;
@@ -1566,10 +1683,17 @@
   tamYaz(false);
 
   // ---------- başlat ----------
+  // bağlantıyla açılış: ?gorunum=yorunge|noral (paylaşılan bağlantı belli görünümde açılsın) · ?ac=<not kimliği> (o not seçili açılır)
+  const adres = new URLSearchParams(location.search);
   let ilkGorunum = "noral";
   try { if (localStorage.getItem("canli-beyin-gorunum") === "yorunge") ilkGorunum = "yorunge"; } catch (e) { /* depolama kapalı */ }
+  if (["noral", "yorunge"].includes(adres.get("gorunum"))) ilkGorunum = adres.get("gorunum");
   gorunumSec(ilkGorunum);
   izdus();
   dongu();
-  setTimeout(() => { const c = ID[AYAR.nabiz] || gunes || D[0]; if (c) atesle(c, false); }, 900);
+  const ilkAcik = ID[adres.get("ac") || ""];
+  setTimeout(() => {
+    if (ilkAcik) { sec(ilkAcik); atesle(ilkAcik); odakla(ilkAcik); return; }
+    const c = ID[AYAR.nabiz] || gunes || D[0]; if (c) atesle(c, false);
+  }, 900);
 })();
