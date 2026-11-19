@@ -1,6 +1,68 @@
+# Canlı Beyin — bu depo yalnız KOD ve UYDURMA örnek veri tutar.
+# Senin hafızan (kasa), ürettiğin canlı sayfa ve sırlar buraya ASLA girmez.
+
+# ── Kendi notlarınla üretilen sayfa / veri (notlarının TAM METNİ)
+/canli/veri.js
+ozel/
+canli-ozel/
+
+# ── Sırlar / kimlik bilgileri
+*.key
+*.pem
+*.p12
+*.pfx
+.env
+.env.*
+*credentials*
+*token*
+*secret*
+.yedek-parola
+.beyin-arsiv-parola
+.beyin-sirlar.txt
+id_rsa*
+id_ed25519*
+known_hosts
+*.gpg
+*.asc
+hafiza/yerel/pc/.claude/kancalar/ayar.sh
+
+# ── Gerçek kasa klasörleri yanlışlıkla köke düşerse (örnek kasa ornek/kasa/ altında)
+/kural/
+/ders/
+/is/
+/gunluk/
+/wiki/
+/arsiv/
+hot.md
+MEMORY.md
+
+# ── Üretilen / geçici
+*.log
+*.tmp
+*.bak
+*.yeni
+*.bozuk
+*.orig
+*.rej
+*.beyin-oncesi
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+venv/
+.venv/
+node_modules/
+
+# ── Arşiv çıktıları (şifreli olsa bile)
+oturum-kayitlari/
+*.tar.zst
+*.tar.gz
+*.zst
+
+# ── Editör / işletim sistemi
 .DS_Store
 Thumbs.db
-# kendi notlarınla ürettiğin özel kopya
-ozel/
+desktop.ini
+*.swp
+*~
+.idea/
+.vscode/
