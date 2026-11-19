@@ -1,0 +1,23 @@
+{
+  "autoMemoryEnabled": false,
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "timeout": 45,
+          "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/kancalar/sunucu.sh\" oturum-basi",
+          "statusMessage": "beyin: sunucudan hafıza yükleniyor" } ] },
+      { "hooks": [ { "type": "command", "timeout": 20,
+          "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/kancalar/yerel-servis.sh\"",
+          "statusMessage": "beyin: yerel hafıza servisi" } ] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "timeout": 25,
+          "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/kancalar/yerel-ates.sh\"",
+          "statusMessage": "beyin: nöron ateşlemesi" } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "timeout": 60, "async": true,
+          "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/kancalar/oturum-sonu.sh\"",
+          "statusMessage": "beyin: konuşma sunucuya yükleniyor" } ] }
+    ]
+  }
+}

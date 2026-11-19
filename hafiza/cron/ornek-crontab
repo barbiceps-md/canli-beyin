@@ -1,0 +1,13 @@
+# ÇALIŞMA ARŞİVİ — 3 katman. kur.sh bu satırları kendi yoluyla basar;
+# `crontab -e` ile ekle. Saatler makinenin saatidir (sunucu UTC ise 00:00 UTC
+# = Türkiye 03:00). Kasa varsayılan yerde değilse satır başına BEYIN_KASA=… koy.
+#
+# Katman 2  her gece       günün hikâyesi → <kasa>/gunluk/<tarih>-ozet.md
+# Katman 3  ayın 2'si      aylık proje tarihçesi → <arşiv>/proje-tarihcesi/
+# Katman 1  ayın 3'ü       45 günden eski ham kayıtlar → şifreli arşiv
+#
+# HİÇBİRİ oturum başında YÜKLENMEZ — bağlam maliyeti sıfır, yalnız aranır.
+
+0 0 * * * BEYIN_KOK/arsivleme/is-gunlugu.sh
+0 1 2 * * BEYIN_KOK/arsivleme/proje-tarihcesi.sh
+0 2 3 * * BEYIN_KOK/arsivleme/oturum-arsivle.sh

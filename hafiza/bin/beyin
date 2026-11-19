@@ -1,0 +1,1275 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+beyin — atomik nöron ağı sorgu aracı (v3.0)
+
+Claude Code oturumları için kalıcı hafıza. Veri (nöronlar) ayrı bir klasörde
+(kasa) durur; bu araç onu sorgular, doğrular ve ona not ekler.
+Sözleşme: <kasa>/NORON.md · Testler: test/hafiza-testleri.sh
+
+Komutlar:  giris · son72 · ates · yol · ara · is · not · geri · liste · saglik · yeni · son · ekle
+"""
+import os, re, sys, subprocess, datetime, glob
+
+# Yerler ortam değişkeniyle ezilebilir (testler kum havuzunu böyle kurar):
+#   BEYIN_KASA        veri klasörü (nöronlar)          varsayılan ~/beyin
+#   BEYIN_ARSIV       çalışma arşivi (tarihçe, loglar)  varsayılan ~/beyin-arsiv
+#   BEYIN_DIS_KAYNAK  kasa dışı aranacak klasörler, ":" ile ayrılır
+#   BEYIN_UTC_FARK    yerel saat farkı                  varsayılan 3
+for _akis in (sys.stdout, sys.stderr):      # Windows konsolu (cp1254) ✓ ⚡ basamıyor
+    try:
+        _akis.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+VAULT = os.path.expanduser(os.environ.get("BEYIN_KASA") or "~/beyin")
+# İkinci bilgisayarda aynı kod kasanın SALT OKUNUR aynasında çalışır:
+# BEYIN_AYNA=1 iken yazma komutları sunucuya yönlendirilir.
+AYNA = os.environ.get("BEYIN_AYNA") == "1"
+ARSIV = os.path.expanduser(os.environ.get("BEYIN_ARSIV") or "~/beyin-arsiv")
+DURUM = os.path.join(os.path.dirname(os.path.realpath(__file__)), "durum")
+try:
+    UTC_FARK = int(os.environ.get("BEYIN_UTC_FARK") or 3)
+except ValueError:
+    UTC_FARK = 3
+NORON_DIRS = ["kural", "ders"]
+KAYNAK_DIRS = ["wiki", "arsiv", "gunluk", "is"]   # 'ara' bunları da tarar (sözleşme: günlük OKUNMAZ, ARANIR)
+# Kasa DIŞINDAKİ aranabilir kaynaklar: aylık proje tarihçesi arşivde durur
+# ama geçmiş araması onu da bulmalı.
+DIS_KAYNAKLAR = [os.path.expanduser(p) for p in
+                 (os.environ.get("BEYIN_DIS_KAYNAK") or "").split(":") if p]
+DIS_KAYNAKLAR = DIS_KAYNAKLAR or [os.path.join(ARSIV, "proje-tarihcesi")]
+MAX_SATIR = 24     # gövdenin DOLU satırı (ön bilgi ve boş satırlar sayılmaz)
+IS_SATIR_TAVANI = 160   # is/acik.md tablo satırı (v3): hikâye ayrıntıya gider
+ARA_TAVAN_ADET = 12     # `ara` en çok bu kadar bölüm basar (gerisi adıyla)
+ARA_TAVAN_BAYT = 10000  # ... ve toplam bu kadar bayt
+SON72_BAYT = 5500       # oturum başı "son 72 saat" özeti tavanı
+SON72_OZET_PAYI = 1400  # bunun kadarı gece özetinin karar/açık-kalan bölümüne ayrılır
+ARA_BOLUM_BAYT = 3000   # `ara`da tek bölüm en çok bu kadar (günlük satırları devasa)
+KONU_DOSYA = os.path.join(VAULT, "konu.tsv")
+BASIM_TAVANI = 40      # tek nöron gövdesi en çok bu kadar satır basılır
+BAG_TURLERI = ["gerekce", "kaniti", "onkosul", "celisir", "yerine-gecti",
+               "birlikte", "ayrinti"]
+GECERLI_TURLER = ("kural", "ders", "olgu")
+
+# ─────────────────────────────────────────────────────────── yardımcılar ────
+def bugun():
+    """Yerel saat = UTC + BEYIN_UTC_FARK (varsayılan 3, Türkiye). Makine UTC'de
+    kalsa bile notlar ve tarihler hep kullanıcının saatindedir."""
+    return datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=UTC_FARK)
+
+def oku(p):
+    try:
+        with open(p, encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return ""
+
+def frontmatter(metin):
+    """--- ... --- bloğunu sözlüğe çevir. Kapanış '---' KENDİ satırında aranır;
+    bir alan DEĞERİNDE geçen '---' bloğu bölemez (23.08 denetim bulgusu)."""
+    m = re.match(r"^---[ \t]*\n(.*?)\n---[ \t]*\n?(.*)$", metin, re.S)
+    if not m:
+        return {}, metin
+    fm = {}
+    for satir in m.group(1).splitlines():
+        if ":" not in satir:
+            continue
+        k, _, v = satir.partition(":")
+        fm[k.strip()] = v.strip()
+    return fm, m.group(2).lstrip("\n")
+
+def liste_ayir(s):
+    return [x.strip() for x in (s or "").split(",") if x.strip()]
+
+def baglar(fm):
+    """bag: gerekce=x, birlikte=y  →  [(tur, hedef), ...]"""
+    out = []
+    for parca in liste_ayir(fm.get("bag", "")):
+        if "=" in parca:
+            t, _, h = parca.partition("=")
+            out.append((t.strip(), h.strip()))
+        else:
+            out.append(("birlikte", parca.strip()))
+    return out
+
+def yerine_gecen(fm):
+    """Nöron 'yerine-gecti' bağı taşıyorsa hedef id'yi döndür (nöron GEÇERSİZDİR)."""
+    for t, h in baglar(fm):
+        if t == "yerine-gecti":
+            return h
+    return None
+
+def noron_dosyalari():
+    """(yol, id) çiftleri — çift id tespiti için ezmeden ham liste."""
+    out = []
+    for alt in NORON_DIRS:
+        for p in sorted(glob.glob(os.path.join(VAULT, alt, "*.md"))):
+            fm, _ = frontmatter(oku(p))
+            out.append((p, fm.get("id") or os.path.splitext(os.path.basename(p))[0]))
+    return out
+
+def noronlar():
+    """Tüm atomik nöronları yükle: {id: dict}. Çift id'de SON dosya kazanır;
+    çakışma tespiti saglik'te dosya taramasıyla yapılır (sözlük ezmesine güvenilmez)."""
+    d = {}
+    for alt in NORON_DIRS:
+        for p in sorted(glob.glob(os.path.join(VAULT, alt, "*.md"))):
+            metin = oku(p)
+            fm, govde = frontmatter(metin)
+            nid = fm.get("id") or os.path.splitext(os.path.basename(p))[0]
+            baslik = ""
+            for s in govde.splitlines():
+                if s.startswith("#"):
+                    baslik = s.lstrip("#").strip()
+                    break
+            d[nid] = dict(id=nid, yol=p, klasor=alt, fm=fm, govde=govde,
+                          baslik=baslik, metin=metin,
+                          satir=len(metin.splitlines()),
+                          # ⚠️ 01.09.2026: boyut ölçüsü GÖVDEnin dolu satırıdır.
+                          # Eskiden dosyanın tamamı sayılıyordu; ön bilgi (tetik
+                          # sözleri) uzadıkça nöron "çok büyük" görünüyor,
+                          # tetik yazmak cezalandırılıyordu. Sözleşme zaten
+                          # "gövde en fazla ~20 satır" diyor.
+                          govde_satir=len([x for x in govde.splitlines()
+                                           if x.strip()]))
+    return d
+
+PUAN_ESIGI = 1.5   # ölçümle ayarlandı (test/isabet)
+SERT_PRIM  = 10.0  # sert kural eşiği daima aşar
+KIMLIK_ESIGI = 3.0
+ORAN_ESIGI = 0.35   # en iyi eşleşmenin bu oranının altı elenir  # sert kural eşiği daima aşar
+
+TR_HARF = str.maketrans("ıİşŞğĞüÜöÖçÇâÂîÎûÛ", "iissgguuooccaaiiuu")
+
+def sadelestir(s):
+    """Türkçe harfleri ASCII'ye indirip küçült. SIRA ÖNEMLİ: translate önce —
+    Python'da 'İ'.lower() 'i'+U+0307 üretir ve düz lower() ile 'i' aramasını
+    kaçırır; translate İ→i'yi lower'dan önce hallettiği için tuzak kapanır."""
+    return s.translate(TR_HARF).lower()
+
+def tetik_esler(tetik, baglam_sade):
+    """Tetik, kelime BAŞINDA eşleşmeli; sonuna ek gelebilir. baglam_sade
+    ÖNCEDEN sadelestir'den geçmiş olmalı (her tetik için yeniden dönüştürmemek için).
+
+    NEDEN kelime başı: düz alt dizi araması 'ip' tetiğini 'tip' içinde bulup
+    alakasız nöron ateşliyordu. NEDEN sona ek serbest: Türkçe eklemeli —
+    'fiyat' tetiği 'fiyatını'da geçer; tam eşleşme çoğu tetiği öldürür.
+    """
+    if len(tetik) < 3:          # 1-2 harflik tetik hiç eşleşmesin
+        return False
+    k = _KALIPLAR.get(tetik)
+    if k is None:
+        # ⚡ 24.10.2026 HIZ: her istemde ~4.400 tetik × regex DERLEMESİ yapılıyordu
+        # (re önbelleği 512'de taşıyor); sürenin %90'ı derlemeydi. Önce ucuz ön
+        # eleme: ilk kelimenin gövdesi metinde alt dizi olarak yoksa eşleşme
+        # İMKÂNSIZ (kalıp onu kelime başında arıyor) → derlemeden dön.
+        t = sadelestir(tetik)
+        ilk = t.split()[0] if t.split() else t
+        govde = ilk[:-1] if len(ilk) >= 3 and ilk[-1] in _YUMUSAMA else ilk
+        if govde not in baglam_sade:
+            return False
+        k = _kalip_derle(tetik, t)
+    return k.search(baglam_sade) is not None
+
+_KALIPLAR = {}   # uzun ömürlü süreçte (PC servisi) derlenen kalıp saklanır
+
+def _kalip_derle(tetik, t):
+    # ⚠️ 31.08.2026 — KISALTMA TUZAĞI. Serbest ek kuralı Türkçe için doğru
+    # ("fiyat" → "fiyatını") ama kısaltmayı ekli kelimeden ayıramıyor:
+    #   GIB → "gibi",  POS → "posta",  SSS → "sssz..."
+    # Ölçüm: 25 cümlelik kümede gürültünün 3'ü tek başına buradan geliyordu.
+    # Çözüm: BÜYÜK HARFLİ ve kısa (≤5) tetik TAM KELİME eşleşmeli, ek almaz.
+    # Uzun/küçük harfli tetiklerde ek serbestliği aynen korunur.
+    if tetik.isupper() and len(tetik) <= 5 and " " not in tetik:
+        k = re.compile(r"(?<!\w)" + re.escape(t) + r"(?!\w)")
+    else:
+        k = re.compile(r"(?<!\w)" + r"\w*\W+".join(_govde_kalip(x) for x in t.split()) + r"\w*")
+    _KALIPLAR[tetik] = k
+    return k
+
+
+# ── ÜNSÜZ YUMUŞAMASI (31.08.2026) ────────────────────────────────────
+# Türkçede sonu k/p/t/ç ile biten gövdeye ünlüyle başlayan ek gelince ünsüz
+# yumuşar:  yedek→yedeği · kitap→kitabı · renk→rengi · ağaç→ağacı
+# sadelestir() ğ→g yaptığı için "yedeği" → "yedegi" olur ve "yedek" öneki
+# ARTIK TUTMAZ. Ölçüm: tetiği "yedek" olan bir güvenlik kuralı
+# "veritabanı yedeği alalım mı" cümlesinde hiç ateşlenmiyordu.
+_YUMUSAMA = {"k": "[kg]", "p": "[pb]", "t": "[td]", "c": "[cç]"}
+
+def _govde_kalip(kelime):
+    """Kelimeyi regex'e çevirir; son harf yumuşayabiliyorsa iki hâli de kabul."""
+    if len(kelime) >= 3 and kelime[-1] in _YUMUSAMA:
+        return re.escape(kelime[:-1]) + _YUMUSAMA[kelime[-1]]
+    return re.escape(kelime)
+
+# ── TETİK AĞIRLIĞI (IDF) — 31.08.2026 ────────────────────────────────
+# Sorun: ateşleme eşleşen tetik SAYISINA göre sıralıyordu; "rapor" gibi 100
+# nöronda geçen genel bir söz ile "migrate" gibi 3 nöronda geçen özel bir söz
+# aynı puanı alıyordu. Ölçüm: 25 cümlelik kümede isabet %32.
+#
+# Çözüm: ağırlığı DIŞ bir sözlükten değil, nöron külliyatının KENDİSİNDEN
+# hesapla (klasik IDF). Bir tetik kaç nöronun metninde geçiyorsa o kadar
+# değersizdir. Sözlük bakımı gerektirmez, yeni nöron eklendikçe kendini günceller.
+_IDF = None
+
+_METINLER = None
+
+def tetik_agirlik(ts):
+    """Tek bir tetiğin nadirlik ağırlığı (IDF). Nadir söz ağır, her yerde
+    geçen söz hafif.
+
+    ⚠️ 31.08.2026 PERFORMANS: ilk sürüm 1.385 tetiğin HEPSİNİN ağırlığını
+    önden hesaplıyordu — 1.385 × 230 = ~318 bin altdizi araması. Kanca her
+    istemde koştuğu için `beyin ates` 0,10s'den 0,40s'ye çıkmıştı; yani her
+    mesaja 0,3s gecikme. Oysa yalnız EŞLEŞEN tetiklerin (tipik 1-10 tane)
+    ağırlığı gerekiyor. Artık istendiğinde hesaplanıp belleğe alınıyor."""
+    global _IDF, _METINLER
+    if _IDF is None:
+        _IDF = {}
+    if ts in _IDF:
+        return _IDF[ts]
+    import math
+    if _METINLER is None:
+        _METINLER = [sadelestir(n["metin"]) for n in noronlar().values()]
+    N = max(len(_METINLER), 1)
+    df = sum(1 for m in _METINLER if ts in m) or 1
+    _IDF[ts] = math.log(N / df)
+    return _IDF[ts]
+
+
+def puan_esigi():
+    """PUAN_ESIGI yüzlerce nöronluk kasada ölçülerek ayarlandı; tetik ağırlığı
+    log(N/df) olduğu için küçük kasada HİÇBİR tetik o eşiğe ulaşamaz (6 nöronda
+    en nadir tetik bile log(6)=1,8; iki nöronda geçen 1,1). Yeni kurulan kasada
+    meşru ikinci kural bu yüzden eleniyordu. Eşik kasa boyuyla ölçeklenir;
+    ~43 nörondan sonra sabit PUAN_ESIGI'ne oturur."""
+    import math
+    tetik_agirlik("")       # _METINLER dolsun
+    return min(PUAN_ESIGI, 0.4 * math.log(max(len(_METINLER), 2)))
+
+
+def tetik_puan(tetik):
+    """Tek bir tetiğin puanı: nadirlik × özgüllük."""
+    ts = sadelestir(tetik)
+    a = tetik_agirlik(ts)
+    # Çok sözcüklü tetik ("ürün fotoğrafı") tek sözcükten daha özgüldür.
+    ozgul = 1.0 + 0.6 * (len(ts.split()) - 1)
+    # Çok kısa tetik (3-4 harf) yanlış eşleşmeye yatkın, hafifletilir.
+    if len(ts) <= 4 and " " not in ts:
+        ozgul *= 0.6
+    return a * ozgul
+
+
+# ⚠️ IGNORECASE şart: "ÖNCE onay + yedek" başlığı büyük harfliydi ve küçük
+# harfli kalıp onu kaçırdı — veri silme güvenlik kuralı sert sayılmayıp
+# elendi. 31.08.2026 ölçümünde yakalandı.
+SERT_KALIP = re.compile(
+    r"(⛔|asla|yasak|dokunulmaz|onay (şart|gerek|iste|al)|önce onay|kesinlikle|geri dönüşsüz)",
+    re.IGNORECASE)
+
+def sert_mi(n):
+    """Sert kural mı? Sert kurallar puan eşiğini BAYPAS eder — bir güvenlik
+    kuralını gürültü diye elemek, gürültüden çok daha pahalıdır.
+
+    ⚠️ 31.08.2026: ölçüt GÖVDE değil BAŞLIK. Gövdede "yasak/onay" arayınca
+    230 nöronun 90'ı (%39) sert sayılıyordu — çoğu sözü geçtiği için, kuralı
+    o olduğu için değil; muafiyet bu kadar genişleyince eşik anlamını yitirdi
+    (holdout isabeti %61,5 → %44,4 düştü). Kuralın kendisi BAŞLIKTA yazılı:
+    başlığa bakınca 230'un 11'i (%4) kalıyor ve liste tam isabet — yalnız
+    gerçekten "asla / önce onay" diyen kurallar."""
+    return bool(SERT_KALIP.search(n["baslik"] or ""))
+
+
+def bayat_mi(fm):
+    g = (fm.get("gecerlilik") or "").strip()
+    if not g or g == "kalici":
+        return False
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})", g)
+    if not m:
+        return False
+    try:
+        son = datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        # 2026-09-31 gibi takvimde olmayan tarih: burada ÇÖKME (23.08 denetimi
+        # tek bozuk nöronun 5 komutu düşürdüğünü gösterdi); saglik ayrıca uyarır.
+        return False
+    return son < bugun().date()
+
+def gecerlilik_bozuk(fm):
+    """'kalici' değil, geçerli bir tarih de değil → şema hatası metni, yoksa None."""
+    g = (fm.get("gecerlilik") or "").strip()
+    if not g or g == "kalici":
+        return None
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})$", g)
+    if not m:
+        return f"gecerlilik '{g}' ne 'kalici' ne tarih (YYYY-AA-GG)"
+    try:
+        datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return f"gecerlilik '{g}' takvimde olmayan tarih"
+    return None
+
+def govde_bas(govde, nid, girinti=""):
+    """Gövdeyi tavanla bas — devasa nöron her isteği su basmasın."""
+    satirlar = govde.rstrip().splitlines()
+    if len(satirlar) > BASIM_TAVANI:
+        print("\n".join(girinti + s for s in satirlar[:BASIM_TAVANI]))
+        print(f"{girinti}… ({len(satirlar) - BASIM_TAVANI} satır daha — `beyin not {nid}`)")
+    else:
+        print("\n".join(girinti + s for s in satirlar))
+
+def bas_noron(n, kisa=False):
+    print(f"\n─── {n['id']}  ({n['klasor']}, güncelleme {n['fm'].get('guncelleme','?')})")
+    yg = yerine_gecen(n["fm"])
+    if yg:
+        print(f"    ⛔ GEÇERSİZ — yerine geçen: {yg} (`beyin yol {yg}`); bu nöron uygulanmaz.")
+    if bayat_mi(n["fm"]):
+        print(f"    ⚠️ BAYAT — geçerlilik {n['fm'].get('gecerlilik')} geçmiş, doğrula")
+    if kisa:
+        print("    " + (n["baslik"] or "(başlıksız)"))
+    else:
+        govde_bas(n["govde"], n["id"])
+
+# ─────────────────────────────────────────────────────────────── komutlar ────
+def k_giris(_):
+    """Oturum başı: ölçülen DURUM + son 72 saat (günlükten, canlı üretilir)
+    + kısa açık iş listesi. v3: giriş nöronu yok, kurallar CLAUDE.md'de
+    (o dosyayı Claude Code kendisi yükler; burada tekrarlamak çift kopyaydı)."""
+    sys.stdout.flush()          # alt süreç çıktısı araya karışmasın
+    subprocess.run(["bash", DURUM] if os.name == "nt" else [DURUM])  # Windows: betik doğrudan koşturulamaz
+    sys.stdout.flush()
+    print("\n" + "═" * 60)
+    k_son72(None)
+    isd = os.path.join(VAULT, "is", "acik.md")
+    if os.path.exists(isd):
+        print("\n" + "═" * 60)
+        print(oku(isd).rstrip())
+
+def _kirp(s, n):
+    s = " ".join(s.split())
+    if len(s) <= n:
+        return s
+    k = s[:n].rsplit(" ", 1)[0]
+    return k + " …"
+
+# ── son72 v4 (24.10.2026) ────────────────────────────────────────────────
+# Notların başı çoğu kez tekrar: "- [00:52] 24.10 ~00:55 TR (yerel PC) …" —
+# saat iki kez, tarih bir kez daha. 230 karakterlik pencerenin ~35'i boşa
+# gidiyordu. Ayrıca dün 47 not vardı, yalnız SON 8'i görünüyordu; o 8'in
+# içinde günün özeti olan "OTURUM KAPANIŞI" notları çoğu kez yoktu.
+# Her parça arkasında BOŞLUK ister: "3.500 ürün" ya da "12.500 TL" tarih/saat
+# sanılıp kırpılmasın; "TRT" de "TR" sanılmasın.
+_NOT_ONEK = re.compile(
+    r"^(\d{1,2}\.\d{1,2}(\.\d{2,4})?(?=\s)\s*)?(~?\d{1,2}[:.]\d{2}(?=\s)\s*)?(TR(?=\s)\s*)?"
+    r"(\((yerel )?(PC|pc)\)\s*)?[:—–-]?\s*")
+_KAPANIS = re.compile(r"KAPANI[ŞS]|kapanış", re.I)
+
+def not_sade(satir):
+    """'- [HH:MM] 24.10 ~00:55 TR (yerel PC) metin' → '[HH:MM] metin'."""
+    m = re.match(r"^- \[(\d{1,2}:\d{2})\]\s*(.*)$", satir)
+    if not m:
+        return satir
+    return f"[{m.group(1)}] " + _NOT_ONEK.sub("", m.group(2), count=1)
+
+def son72_sec(notlar, adet):
+    """Gösterilecek notlar: önce oturum kapanış özetleri (en yeniler), sonra
+    kalan yer en yeni notlarla dolar; sıra korunur."""
+    if len(notlar) <= adet:
+        return notlar
+    kapanis = [i for i, n in enumerate(notlar) if _KAPANIS.search(n)][-max(1, adet // 2):]
+    kalan = [i for i in range(len(notlar)) if i not in kapanis]
+    secim = set(kapanis) | set(kalan[-(adet - len(kapanis)):] if adet > len(kapanis) else [])
+    return [notlar[i] for i in sorted(secim)]
+
+def k_son72(_):
+    """SON 72 SAAT — günlük notlarından canlı üretilen özet. Hiçbir yere
+    yazılmaz, her çağrıda taze. NEDEN (05.09.2026 denetimi): günde 10-18 oturum
+    açılıyor ve hiçbiri bir öncekinin ne yaptığını görmüyordu; gece özetleri
+    yazılıp hiç okunmuyordu. Bu yüzden hikâye tek yüklenen yere (is/acik.md)
+    sızıp satırları 1.000 karaktere şişirmişti. Artık hikâyenin kendi yeri var."""
+    bugun_t = bugun().date()
+    gunler = [bugun_t - datetime.timedelta(days=i) for i in range(3)]
+    kota = {0: 10, 1: 8, 2: 5}            # gün başına en çok not
+    butce = SON72_BAYT - SON72_OZET_PAYI     # notlar; özet payı ayrı
+    cikti = [f"╭─ SON 72 SAAT — günlükten otomatik ({bugun_t:%d.%m.%Y}) ─ hikâye burada, açık iş listesinde değil"]
+    for i, g in enumerate(gunler):
+        p = os.path.join(VAULT, "gunluk", f"{g:%Y-%m-%d}.md")
+        notlar = [l for l in oku(p).splitlines() if l.startswith("- [")]
+        if not notlar:
+            continue
+        etiket = "bugün" if i == 0 else ("dün" if i == 1 else "önceki gün")
+        secilen = son72_sec(notlar, kota[i])
+        blok = [f"│ {g:%d.%m} ({etiket}) — {len(notlar)} not" +
+                (f", {len(secilen)} gösteriliyor (oturum kapanışları önce)" if len(secilen) < len(notlar) else "")]
+        for n in secilen:
+            blok.append("│ " + _kirp(not_sade(n), 230))
+        metin = "\n".join(blok)
+        if len(metin) > butce and i > 0:
+            break
+        cikti.append(metin); butce -= len(metin)
+    butce += SON72_OZET_PAYI
+    # En taze gece özetinin karar + açık kalanlar bölümleri (yazıldı ama hiç
+    # okunmuyordu — en değerli iki bölümü buraya).
+    ozetler = sorted(glob.glob(os.path.join(VAULT, "gunluk", "*-ozet.md")))
+    if ozetler and butce > 800:
+        p = ozetler[-1]; metin = oku(p); bolum = None; al = {"Neden böyle yapıldı": [], "Açık kalanlar": []}
+        for l in metin.splitlines():
+            if l.startswith("## "):
+                bolum = l.lstrip("# ").strip(); continue
+            if bolum in al and l.startswith("- "):
+                al[bolum].append(_kirp(l, 200))
+        blok = [f"│ Gece özeti {os.path.basename(p)[:10]}: kararlar ve açık kalanlar"]
+        kalan = butce - len(blok[0])
+        # Bütçeye sığdığı kadar satır: ya hep ya hiç değil (05.09: 11 madde
+        # 1.100 baytlık paya sığmayınca bölüm TAMAMEN düşüyordu).
+        for k, kota_b in (("Neden böyle yapıldı", 6), ("Açık kalanlar", 5)):
+            for l in al[k][:kota_b]:
+                if len(l) + 3 > kalan:
+                    break
+                blok.append("│ " + l); kalan -= len(l) + 3
+        if len(blok) > 1:
+            cikti.append("\n".join(blok))
+    cikti.append("╰─ tam metin: gunluk/<tarih>.md · arama: beyin ara <kelime>")
+    print("\n".join(cikti))
+
+def k_is(arg):
+    """Açık işin kısa satırı + ayrıntısı (is/ayrinti.md'deki bölüm)."""
+    if not arg:
+        print("kullanım: beyin is <madde no>   (örn. beyin is 90o)"); return
+    no = arg[0].strip("| ")
+    acik = oku(os.path.join(VAULT, "is", "acik.md"))
+    satir = [l for l in acik.splitlines() if re.match(r"^\| " + re.escape(no) + r" \|", l)]
+    if satir:
+        print(satir[0])
+    else:
+        print(f"(is/acik.md'de {no} satırı yok — kapanmış olabilir)")
+    ayr = oku(os.path.join(VAULT, "is", "ayrinti.md"))
+    m = re.search(r"^### " + re.escape(no) + r"\s*$(.*?)(?=^### |^## |\Z)", ayr, re.M | re.S)
+    if m:
+        print("\n─── ayrıntı (is/ayrinti.md)")
+        print(m.group(1).strip())
+    else:
+        print("(ayrıntı bölümü yok)")
+
+
+# ── KONU DİZİNİ (v3, 05.09.2026) ────────────────────────────────────────
+# Nöron tetiği tutmayınca sessizlik oluyordu: konuyla ilgili onlarca nöron ve
+# hazır bir wiki sayfası dururken geniş bir soru HİÇBİR şey
+# ateşlemiyordu. konu.tsv küçük bir "konu → kaynak sayfa" tablosu; eşleşen
+# konu tek satırlık işaret bırakır (en çok 3), gövde yüklemez.
+def konular():
+    out = []
+    for l in oku(KONU_DOSYA).splitlines():
+        if not l.strip() or l.startswith("#"):
+            continue
+        parca = l.split("\t")
+        if len(parca) < 2:
+            continue
+        hedef = parca[1].strip()
+        out.append((liste_ayir(parca[0]), hedef, parca[2].strip() if len(parca) > 2 else ""))
+    return out
+
+def konu_isaretleri(baglam_sade, haric=()):
+    isaret = []
+    for tetikler, hedef, aciklama in konular():
+        vuran = [t for t in tetikler if t and tetik_esler(t, baglam_sade)]
+        if not vuran or hedef in haric:
+            continue
+        isaret.append((sum(tetik_puan(t) for t in vuran), vuran, hedef, aciklama))
+    isaret.sort(key=lambda x: -x[0])
+    return isaret[:3]
+
+# ── ANLAM KATMANI (Beyin v4, 24.10.2026) ────────────────────────────────
+# Tetik eşleşmesi KELİMEYE bakar; kullanıcı günlük dille yazar. Ölçümde
+# "müşteriye mesaj at" gibi bir cümle o konudaki onlarca nörondan HİÇBİRİNİ getirmedi.
+# Yerel dil modeli (beyin-anlam servisi, bin/beyin-anlam) mesajı ANLAMINA
+# göre nöronlarla karşılaştırır. İki yol BİRLİKTE çalışır:
+#   · tetikle gelen SERT kural (⛔/asla/onay…) HER ZAMAN basılır (güvenlik);
+#   · tetikle gelen diğerleri anlamca da yakınsa ya da tetik puanı güçlüyse basılır;
+#   · tetik tutmasa da anlamca kalabalıktan belirgin ayrılan nöron basılır.
+# Servis kapalı/yavaşsa (1,5 sn) her şey ESKİ yolla yürür: hafıza servise bağımlı değil.
+# Servis adresi: sunucuda Unix soketi, Windows PC'de yalnız 127.0.0.1'e açık TCP.
+ANLAM_ADRES = os.environ.get("BEYIN_ANLAM_ADRES") or (
+    "tcp:127.0.0.1:7341" if os.name == "nt" else
+    "unix:" + os.environ.get("BEYIN_ANLAM_SOKET", "/run/beyin-anlam/soket"))
+ATES_KAYIT = os.path.expanduser(os.environ.get("BEYIN_ATES_KAYIT") or os.path.join(ARSIV, "beyin-ates.tsv"))
+# Eşikler ölçümle seçildi (test/anlam/kalibre3.py; kendi kasanda yeniden ölçülebilir).
+# z = nöronun anlam skorunun, o mesajda TÜM nöronların ortalamasından kaç
+# standart sapma yukarıda olduğu. Sohbet mesajında ("tamam devam et") dağılım
+# düzdür, z küçük kalır; konulu mesajda ilgili nöronlar kalabalıktan fırlar.
+# Mutlak skor işe yaramıyor: e5'te her şey 0,75-0,90 arasına sıkışıyor.
+#
+# İKİ KADEME (24.10 ölçümü): tam gövde pahalıdır (nöron başına ~500 jeton), bu
+# yüzden yalnız emin olunana basılır. Sıradaki adaylar yalnız BAŞLIKLA, tek
+# satır gelir (🧭) — nöron başlığı kuralın kendisidir ("canlı veride silme:
+# ÖNCE onay + yedek"), oturum ilgili gördüğünü `beyin not <id>` ile açar.
+# Tek kademede eşik ya sohbet mesajında gürültü yapıyor ya da ilgili kuralların
+# yarısını eliyordu; başlık satırı bu ikilemi ucuzlatır.
+ANLAM_AYAR = dict(
+    Z_ANLAM=3.9,    # tetik tutmasa da bu z'nin üstü tek başına TAM basılır
+    Z_TEYIT=1.0,    # tetikle gelen (sert olmayan) nöron en az bu z'de olmalı…
+    HAM_GUCLU=99.0, # …ya da tetik puanı bu kadar güçlü olmalı (99 = yalnız teyitle)
+    LEX_W=0.35,     # sıralamada tetik puanının ağırlığı
+    TAVAN=3,        # en çok bu kadar nöron gövdesi basılır (sert kurallar hariç)
+    Z_LISTE=2.0,    # 🧭 başlık satırı için eşik
+    LISTE_ADET=5,   # 🧭 en çok bu kadar başlık
+    MIN_KELIME=4,   # bundan kısa mesajda ("evet yap") anlam yolu çalışmaz, yalnız tetik
+    Z_KAYIT=3.8,    # 📓 günlük / açık iş kaydı için eşik
+    KAYIT_ADET=2,   # 📓 en çok bu kadar kayıt
+    # (varsayılanlar bge-m3 ölçümüdür; servis kendi modelinin eşiklerini cevapla gönderir)
+)
+
+def anlam_sor(istek, zaman=1.5):
+    """beyin-anlam servisine tek istek. Servis yok / yavaş / hazır değil → None."""
+    if os.environ.get("BEYIN_ANLAM", "1") == "0":
+        return None
+    import socket, json
+    try:
+        tur, _, yer = ANLAM_ADRES.partition(":")
+        if tur == "tcp":
+            konak, _, port = yer.rpartition(":")
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(zaman)
+            s.connect((konak, int(port)))
+        else:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(zaman)
+            s.connect(yer)
+        s.sendall((json.dumps(istek, ensure_ascii=False) + "\n").encode("utf-8"))
+        veri = b""
+        while not veri.endswith(b"\n"):
+            parca = s.recv(65536)
+            if not parca:
+                break
+            veri += parca
+        s.close()
+        cevap = json.loads(veri.decode("utf-8"))
+        return cevap if cevap.get("hazir") else None
+    except Exception:
+        return None
+
+def anlam_secimi(guclu, anlam, hepsi, ayar=None, kelime=99):
+    """Tetik adayları + anlam skorları → (tam basılacak [(skor, etiket, n)],
+    🧭 başlıkla anılacak [n], tür). Eşikler MODELE özgüdür: servis kendi modelinin
+    ölçülmüş eşiklerini cevapla gönderir ("ayar"); burada varsayılanın üstüne yazılır."""
+    a = dict(ANLAM_AYAR); a.update(anlam.get("ayar") or {}); a.update(ayar or {})
+    if kelime < a["MIN_KELIME"]:
+        anlam = {"sonuc": [], "ist": anlam.get("ist"), "ozel": anlam.get("ozel")}
+    mu, sd = (anlam.get("ist", {}).get("n") or [0.0, 1.0])
+    sd = sd or 1e-6
+    z = {}
+    for kayit_ in anlam.get("sonuc", []):
+        if kayit_[0].startswith("n:"):
+            z[kayit_[0][2:]] = (kayit_[1] - mu) / sd
+    for pid, s in (anlam.get("ozel") or {}).items():
+        z.setdefault(pid[2:], (s - mu) / sd)
+    aday = {}
+    for _puan, eslesen, n, ham in guclu:
+        aday[n["id"]] = (n, eslesen, ham)
+    for nid in z:
+        if nid in hepsi and nid not in aday:
+            aday[nid] = (hepsi[nid], [], 0.0)
+    goster, aday_liste = [], []
+    for nid, (n, eslesen, ham) in aday.items():
+        zz = z.get(nid, -9.0)
+        skor = zz + a["LEX_W"] * min(ham, 8.0)
+        if eslesen:
+            sert = sert_mi(n)
+            if sert or zz >= a["Z_TEYIT"] or ham >= a["HAM_GUCLU"]:
+                goster.append((skor + (SERT_PRIM if sert else 0.0), eslesen, n, sert))
+                continue
+        elif zz >= a["Z_ANLAM"]:
+            goster.append((skor, [], n, False))
+            continue
+        if eslesen or zz >= a["Z_LISTE"]:
+            aday_liste.append((skor, n))
+    goster.sort(key=lambda x: -x[0])
+    # Sert kurallar tavana takılmaz (güvenlik kuralını tavan yüzünden düşürmek, gürültüden pahalı)
+    sert_olan = [g for g in goster if g[3]]
+    digerleri = [g for g in goster if not g[3]]
+    vurus = sert_olan + digerleri[:max(0, a["TAVAN"] - len(sert_olan))]
+    liste = sorted([(s, n) for s, _, n, _ in digerleri[len(vurus) - len(sert_olan):]] + aday_liste,
+                   key=lambda x: -x[0])
+    return ([(s, e, n) for s, e, n, _ in vurus], [n for _, n in liste[:a["LISTE_ADET"]]], "ateşlendi")
+
+# ── ANLAM YALNIZ EKLER (16.11.2026) ─────────────────────────────────────
+# Ölçüm: anlam sıralaması tetikle DOĞRU gelen kuralları düşürüyordu (doğrudan
+# mesajlarda 7 kuraldan 5'i gelirken 4'e indi: tetiği tutan bir kural anlamca
+# z=0,48 ile 41. sıraya düştü, bir başkası tavana takıldı). Kullanıcı kuralını
+# kaçırmak gürültüden pahalı; bu yüzden
+# normal mesajda tetik yolunun seçtiği HER ŞEY aynen basılır (servis kapalıyken
+# ne geliyorsa o), anlam yalnız ÜSTÜNE ekler: belirgin anlam isabeti gövdeyle
+# (en çok ANLAM_EK), daha zayıfları 🧭 başlıkla. Uzun yapıştırmada eski kısıtlı
+# anlam seçimi sürer (24.10: 120 satırlık rapor 6 gövde yüklemişti).
+ANLAM_EK = 1       # tetikte olmayan belirgin anlam isabeti (z ≥ Z_ANLAM): en çok bu kadar gövde
+TABAN_GOVDE = 3    # tetik adaylarından sert OLMAYANLARIN gövde tavanı (sert kurallar tavan dışı);
+                   # sıra = anlam z + LEX_W·tetik puanı; tavanı aşan 🧭 başlıkla gelir, düşmez
+
+def birlesik_secim(guclu, zayif, anlam, hepsi, kelime):
+    """→ (basılacak [(puan, etiket, n)], adı anılacak elenen [n], 🧭 [n], tür)."""
+    secim = eski_secim(guclu, zayif)
+    taban, taban_elenen, tur = secim if secim else ([], [], "")
+    a_vurus, a_liste, _ = anlam_secimi(guclu, anlam, hepsi, kelime=kelime)
+    # Tetik seçimi eşit puanlı adayları topluca getirir (tek bir iş sözü → aynı konuda 5 kural).
+    # Sert kurallar hep gövdeyle; diğerleri anlam+tetik birleşik puanıyla sıralanır, ilk
+    # TABAN_GOVDE gövdeyle, kalanı 🧭 başlıkla (kaybolmaz, ucuzlar). Anlam eşiği YOK:
+    # anlamca z=0,48 kalan kural yine de doğru kuraldı. Kısa mesajda anlam çalışmaz → tetik aynen.
+    a = dict(ANLAM_AYAR); a.update(anlam.get("ayar") or {})
+    mu, sd = (anlam.get("ist", {}).get("n") or [0.0, 1.0])
+    z = {k[2:]: (s - mu) / (sd or 1e-6) for k, s, *_ in anlam.get("sonuc", []) if k.startswith("n:")}
+    for k, s in (anlam.get("ozel") or {}).items():
+        z.setdefault(k[2:], (s - mu) / (sd or 1e-6))
+    ham = {g[2]["id"]: g[3] for g in guclu}
+    indir = []
+    if kelime >= a["MIN_KELIME"]:
+        sert_v = [v for v in taban if sert_mi(v[2])]
+        diger = sorted([v for v in taban if not sert_mi(v[2])],
+                       key=lambda v: -(z.get(v[2]["id"], -9.0) + a["LEX_W"] * min(ham.get(v[2]["id"], 0.0), 8.0)))
+        taban = sert_v + diger[:TABAN_GOVDE]
+        indir = [v[2] for v in diger[TABAN_GOVDE:]]
+    var = {n["id"] for _, _, n in taban}
+    ek = [v for v in a_vurus if v[2]["id"] not in var and v[2]["id"] not in {n["id"] for n in indir}][:ANLAM_EK]
+    vurus = list(taban) + ek
+    var |= {n["id"] for _, _, n in ek}
+    # önce tetikten inenler, sonra anlamın teyit ettiği adaylar 🧭'ye; kalan tetik elenenleri adıyla
+    liste = indir + [n for n in a_liste if n["id"] not in var and n not in indir]
+    liste = liste[:max(ANLAM_AYAR["LISTE_ADET"], len(indir))]
+    var |= {n["id"] for n in liste}
+    elenen = [n for n in taban_elenen if n["id"] not in var]
+    if not taban and ek:
+        tur = "ateşlendi"
+    return vurus, elenen, liste, tur or "ateşlendi"
+
+def kayit_isaretleri(baglam, ayar=None):
+    """📓 Mesajla anlamca örtüşen günlük notu / gece özeti / açık iş kaydı.
+    NEDEN: "o tedarikçiye ne yazmıştık" diye sorulunca oturum önce `beyin ara`
+    koşup doğru kelimeyi tahmin etmek zorundaydı; ilgili kayıt artık kendiliğinden gelir."""
+    if len(baglam.split()) < ANLAM_AYAR["MIN_KELIME"]:
+        return []
+    c = anlam_sor({"q": baglam[:4000], "tur": ["g", "o", "i", "k", "a"], "k": 12, "alinti": 400})
+    if not c:
+        return []
+    return kayit_secimi(c, ayar)
+
+def kayit_secimi(c, ayar=None):
+    """Servis cevabı → gösterilecek kayıtlar [(z, pid, metin)] (ölçüm betiği de bunu çağırır)."""
+    a = dict(ANLAM_AYAR); a.update(c.get("ayar") or {}); a.update(ayar or {})
+    ist, out, gorulen = c.get("ist", {}), [], set()
+    for pid, s, metin in c.get("sonuc", []):
+        mu, sd = ist.get(pid[0], [0.0, 1.0])
+        z = (s - mu) / (sd or 1e-6)
+        anahtar = pid.split("#")[0]
+        if z < a["Z_KAYIT"] or anahtar in gorulen:
+            continue
+        gorulen.add(anahtar)
+        out.append((z, pid, metin))
+    out.sort(key=lambda x: -x[0])
+    return out[:a["KAYIT_ADET"]]
+
+def kayit_etiketi(pid):
+    tur, _, yer = pid.partition(":")
+    if tur in ("g", "o"):
+        return f"{yer[8:10]}.{yer[5:7]} " + ("günlük" if tur == "g" else "gece özeti")
+    if tur in ("w", "t"):
+        return ("wiki/" if tur == "w" else "tarihçe/") + yer.split("#")[0]
+    return {"i": "açık iş", "k": "küçük iş", "a": "iş ayrıntısı", "n": "nöron"}.get(tur, tur)
+
+def kayit_bas(kayitlar):
+    if not kayitlar:
+        return
+    print("\n📓 Hafızadaki ilgili kayıtlar (tamamı: `beyin ara <kelime>` · `beyin is <no>`):")
+    for _z, pid, metin in kayitlar:
+        print(f"   • {kayit_etiketi(pid)}: {_kirp(metin, 240)}")
+
+def ates_kaydet(vurus, elenen, yol):
+    """Hangi nöron ne zaman ateşlendi — yalnız kancadan gelen gerçek istemler
+    (BEYIN_KAYIT=1). İstem METNİ yazılmaz; yalnız nöron adları. Amaç: hiç
+    ateşlenmeyen (ölü) ve sürekli ateşlenen (gürültücü) nöronu ölçmek."""
+    if os.environ.get("BEYIN_KAYIT") != "1":
+        return
+    try:
+        with open(ATES_KAYIT, "a", encoding="utf-8") as f:
+            f.write(f"{bugun():%Y-%m-%d %H:%M}\t{yol}\t"
+                    f"{','.join(n['id'] for _, _, n in vurus)}\t"
+                    f"{','.join(n['id'] for n in elenen[:8])}\n")
+    except OSError:
+        pass
+
+def sozcuk_eslesmeleri(baglam_sade, hepsi):
+    """ESKİ (tetik) yol: (guclu, zayif) aday listeleri."""
+    guclu, zayif = [], []
+    for n in hepsi.values():
+        tetikler = liste_ayir(n["fm"].get("tetik", ""))
+        eslesen = [t for t in tetikler if t and tetik_esler(t, baglam_sade)]
+        if eslesen:
+            # ⚠️ 31.08.2026: eskiden sıralama len(eslesen) idi — "rapor" ile
+            # "migrate" aynı ağırlıktaydı. Artık nadirlik puanı toplanıyor.
+            ham = sum(tetik_puan(t) for t in eslesen)
+            # SERT_PRIM yalnız SIRALAMAYI etkiler; göreli eşik HAM puandan
+            # hesaplanır. Aksi hâlde tepedeki sert kural (+10) eşiği yukarı
+            # çekip yanındaki meşru eşleşmeyi eliyordu: iki ayrı ölçüm
+            # cümlesinde, sert kuralın yanında gelmesi gereken ikinci kural
+            # bu yüzden kaçmıştı (31.08.2026 ölçümü).
+            puan = ham + (SERT_PRIM if sert_mi(n) else 0.0)
+            guclu.append((puan, eslesen, n, ham)); continue
+        # Geri düşüş: tetik tutmadıysa nöron adındaki konu sözcükleri.
+        #
+        # ⚠️ 31.08.2026 ÖLÇÜM: bu geri düşüş gürültünün büyük kaynağıydı —
+        # "bu işlerin HEPSİni yap" cümlesi adında "hepsi" geçen alakasız bir
+        # nöronu, "şu DOSYAyı okur musun" ise adında "dosya" geçen bir nöronu
+        # ateşliyordu. Kimlikteki sözcük tetik değildir; yazarın dosya adı
+        # tercihidir. Artık nadirlik puanı aranıyor: her yerde geçen bir
+        # sözcük ("dosya", "hepsi", "liste") geri düşüşü tetikleyemez.
+        kimlik = [p for p in n["id"].split("-") if len(p) >= 4]
+        vuran = [p for p in kimlik if tetik_esler(p, baglam_sade)]
+        if vuran:
+            kpuan = sum(tetik_puan(p) for p in vuran)
+            if len(vuran) >= 2:
+                zayif.append((kpuan, vuran, n, kpuan))
+    return guclu, zayif
+
+def eski_secim(guclu, zayif):
+    """v3 seçimi — anlam servisi yokken davranış BİREBİR aynı kalsın diye ayrı.
+    → (basılacak [(puan, etiket, n)], anılacak [n], tür) ya da None (eşleşme yok)."""
+    # TAVAN: geniş istem 27 nöron yüklemişti (21,8 KB) — aşırı ateşleme asıl
+    # kuralı gürültüye gömer. Elenenler AÇIKÇA listelenir.
+    TAVAN = 6
+    if guclu:
+        # PUAN EŞİĞİ: eşiğin altında kalan eşleşme "geçti ama zayıf" demektir;
+        # basmak yerine adı anılır. Sert kurallar SERT_PRIM sayesinde her
+        # hâlükârda eşiğin üstünde kalır (recall %100 korunur).
+        # ⚠️ 31.08.2026 — ELEME ASLA MUTLAK DEĞİL, HEP GÖRECELİ.
+        # İlk deneme "tek ve zayıf tetik ateşleyemez" diyordu; sınav kümesinde
+        # recall'u %60'tan %40'a düşürdü. Bir güvenlik
+        # kuralını kaçırmak, gürültüden çok daha pahalı.
+        #
+        # Doğrusu: eşleşen TEK nöronsa daima göster. Ancak rakip varken zayıf
+        # olanı ele — o zaman eleme bir şeyi kaybettirmiyor, sıralıyor.
+        en_iyi_ham = max(g[3] for g in guclu)
+        if len(guclu) == 1:
+            gecen, elenen_zayif = guclu, []
+        else:
+            # Eşiği en iyinin oranına bağla: en iyiden çok geride kalan eşleşme
+            # muhtemelen bağlamla değil tek genel sözcükle tutmuştur.
+            taban = max(puan_esigi(), en_iyi_ham * ORAN_ESIGI)
+            gecen = [g for g in guclu if g[3] >= taban or sert_mi(g[2])]
+            elenen_zayif = [g for g in guclu if not (g[3] >= taban or sert_mi(g[2]))]
+        if gecen:
+            sirali, tur = sorted(gecen, key=lambda x: -x[0]), "ateşlendi"
+        else:
+            sirali, tur, elenen_zayif = sorted(guclu, key=lambda x: -x[0])[:1], "zayıf eşleşme", []
+    elif zayif:
+        sirali, tur = sorted(zayif, key=lambda x: -x[0]), "konu yakınlığıyla geldi"
+        elenen_zayif = []
+    else:
+        return None
+    vurus, elenen = sirali[:TAVAN], sirali[TAVAN:] + elenen_zayif
+    return [(p, e, n) for p, e, n, _ in vurus], [g[2] for g in elenen], tur
+
+# Uzun istem (yapıştırılmış rapor/log, alt ajan dönüşü) tetik kelimelerinin
+# çoğunu birden tutturur: 24.10'da 120 satırlık bir ajan raporu 86 nöron
+# eşleştirip 6 gövdeyi (≈6 KB) bağlama yükledi. Uzun metinde tavan düşer.
+UZUN_ISTEM = 1500
+UZUN_TAVAN = 2
+
+def k_ates(arg):
+    """Bağlama uyan nöronları ateşle. Argüman: serbest metin veya dosya yolu
+    (dosyaysa İÇERİĞİ bağlama katılır — 23.08 denetim bulgusu 8)."""
+    if not arg:
+        print("kullanım: beyin ates <metin veya dosya yolu>"); return
+    baglam = " ".join(arg)
+    if len(arg) == 1 and os.path.isfile(arg[0]):
+        try:
+            with open(arg[0], encoding="utf-8", errors="ignore") as f:
+                baglam = arg[0] + " " + f.read(65536)   # 64 KB tavan
+        except OSError:
+            pass
+    baglam_sade = sadelestir(baglam)
+    hepsi = noronlar()
+    guclu, zayif = sozcuk_eslesmeleri(baglam_sade, hepsi)
+    anlam = anlam_sor({"q": baglam[:4000], "tur": ["n"], "k": 40,
+                       "ozel": ["n:" + g[2]["id"] for g in guclu]})
+    liste = []
+    if anlam and len(baglam) > UZUN_ISTEM:
+        vurus, liste, tur = anlam_secimi(guclu, anlam, hepsi, {"TAVAN": UZUN_TAVAN, "LISTE_ADET": 3},
+                                         kelime=len(baglam.split()))
+        elenen, kayitlar = liste, []
+    elif anlam:
+        vurus, elenen, liste, tur = birlesik_secim(guclu, zayif, anlam, hepsi, len(baglam.split()))
+        kayitlar = kayit_isaretleri(baglam)
+    else:
+        secim = eski_secim(guclu, zayif)
+        vurus, elenen, tur = secim if secim else ([], [], "")
+        kayitlar = []
+    ates_kaydet(vurus, elenen, "anlam" if anlam else "tetik")
+    if not vurus:
+        konu = konu_isaretleri(baglam_sade)
+        if not konu and not kayitlar and not liste:
+            print("(bu bağlamda ateşlenen nöron yok)"); return
+        liste_bas(liste)
+        if konu:
+            print("(nöron ateşlenmedi) 📎 konunun kaynağı:")
+            for _, vuran, hedef, aciklama in konu:
+                print(f"   {hedef} — {aciklama}   [{', '.join(vuran)}]  →  beyin not {hedef}")
+        kayit_bas(kayitlar)
+        return
+    print(f"⚡ {len(vurus)} nöron {tur}:")
+    if elenen and (not liste or len(baglam) <= UZUN_ISTEM):
+        print(f"   (+{len(elenen)} nöron daha eşleşti, gösterilmedi: "
+              f"{', '.join(n['id'] for n in elenen[:8])}"
+              f"{' …' if len(elenen) > 8 else ''} — `beyin yol <id>` ile aç)")
+    for _, eslesen, n in vurus:
+        print(f"\n─── {n['id']}   [{', '.join(eslesen) if eslesen else 'anlamca yakın'}]")
+        yg = yerine_gecen(n["fm"])
+        if yg:
+            # NORON.md kural 3: yerine-gecti taşıyan nöron AÇILMAZ, geçersizdir.
+            print(f"⛔ GEÇERSİZ — yerine geçen: {yg} (`beyin yol {yg}`); bu nörona uyma.")
+            continue
+        if bayat_mi(n["fm"]):
+            print(f"⚠️ BAYAT — geçerlilik {n['fm'].get('gecerlilik')} geçmiş; uygulamadan önce doğrula.")
+        govde_bas(n["govde"], n["id"])
+    liste_bas(liste)
+    kayit_bas(kayitlar)
+    konu = konu_isaretleri(baglam_sade)
+    if konu:
+        print("\n📎 konunun kaynağı: " + " · ".join(f"{h} ({a})" for _, _, h, a in konu))
+
+def liste_bas(liste):
+    """🧭 ikinci kademe: yalnız başlık (başlık = kuralın kendisi). Ucuz; oturum ilgiliyi açar."""
+    if not liste:
+        return
+    print("\n🧭 Belki ilgili (yalnız başlık — gerekirse `beyin not <id>`):")
+    for n in liste:
+        print(f"   • {n['id']} — {_kirp(n['baslik'] or '', 150)}")
+
+def k_yol(arg):
+    """Nöronu + bir sıçramalık komşularını bas."""
+    if not arg:
+        print("kullanım: beyin yol <id>"); return
+    hepsi = noronlar()
+    nid = arg[0]
+    if nid not in hepsi:
+        aday = [k for k in hepsi if nid in k]
+        if len(aday) == 1:
+            nid = aday[0]
+        else:
+            print(f"bulunamadı: {nid}" + (f" — yakın: {', '.join(aday[:5])}" if aday else ""))
+            return
+    n = hepsi[nid]
+    bas_noron(n)
+    ileri = baglar(n["fm"])
+    if ileri:
+        print("\n  ↓ giden bağlar:")
+        for t, h in ileri:
+            if t == "yerine-gecti":
+                print(f"    ⛔ {t} → {h}  (bu nöron GEÇERSİZ, oraya bak)")
+            elif h in hepsi:
+                print(f"    {t} → {h}: {hepsi[h]['baslik']}")
+            else:
+                yol = os.path.join(VAULT, "wiki", h + ".md")
+                print(f"    {t} → {h}" + ("  (wiki sayfası)" if os.path.exists(yol) else "  ⚠️ KIRIK"))
+    geri = [m for m in hepsi.values() if nid in [h for _, h in baglar(m["fm"])]]
+    if geri:
+        print("\n  ↑ gelen bağlar:")
+        for m in geri:
+            print(f"    {m['id']}: {m['baslik']}")
+
+def k_ara(arg):
+    """Nöronlarda tam nöron, kaynak dosyalarda BÖLÜM döndürür (dosya değil).
+    Arama Türkçe-duyarsızdır: 'fotograf' da 'fotoğraf' da aynı sonucu verir
+    (23.08 denetimi: ham arama İ/ğ yüzünden hafızanın yarısını görmüyordu).
+
+    v3: SIRALI ve TAVANLI. Eskiden sık geçen bir kelime 540 KB / 201 bölüm
+    döndürüyordu; terminal bunu dosyaya atıp 2 KB önizleme
+    gösterdiği için arama fiilen kördü. Artık puanla sıralanır (başlıkta geçme,
+    geçme sayısı, nöron/açık iş/taze günlük primi), en çok ARA_TAVAN_ADET bölüm
+    ve ARA_TAVAN_BAYT bayt basılır; kalanlar adıyla listelenir. `--tum` eski davranış."""
+    if not arg:
+        print("kullanım: beyin ara <kelime> [--tum]"); return
+    tum = "--tum" in arg
+    arg = [a for a in arg if a != "--tum"]
+    kelime = sadelestir(" ".join(arg))
+    vurus = []      # (puan, tur, etiket, metin_satirlari, ipucu)
+    for n in noronlar().values():
+        sade = sadelestir(n["metin"])
+        if kelime in sade:
+            puan = 4 + min(sade.count(kelime), 6) + (6 if kelime in sadelestir(n["baslik"]) else 0)
+            if yerine_gecen(n["fm"]):
+                puan -= 8
+            vurus.append((puan, "noron", n, None, None))
+    kaynaklar = [os.path.join(VAULT, alt, "*.md") for alt in KAYNAK_DIRS]
+    kaynaklar.append(os.path.join(VAULT, "*.md"))       # kök dosyalar (NORON.md vb.)
+    kaynaklar += [os.path.join(d, "*.md") for d in DIS_KAYNAKLAR]
+    simdi = bugun().date()
+    for kalip in kaynaklar:
+        for p in sorted(glob.glob(kalip)):
+            metin = oku(p)
+            if kelime not in sadelestir(metin):
+                continue
+            rel = os.path.relpath(p, VAULT)
+            prim = 0
+            if rel.startswith("is/"):
+                prim = 3
+            elif rel.startswith("gunluk/"):
+                m = re.match(r"gunluk/(\d{4}-\d{2}-\d{2})", rel)
+                try:
+                    yas = (simdi - datetime.date.fromisoformat(m.group(1))).days if m else 99
+                except ValueError:
+                    yas = 99
+                prim = 3 if yas <= 3 else (2 if yas <= 14 else 0)
+            satirlar = metin.splitlines()
+            baslik, tampon = "(başlangıç)", []
+            def bolum_kapat():
+                if not tampon and kelime not in sadelestir(baslik):
+                    return
+                sade_b = sadelestir("\n".join(tampon))
+                adet = sade_b.count(kelime)
+                if kelime in sadelestir(baslik):
+                    adet += 1
+                if not adet:
+                    return
+                puan = prim + min(adet, 5) + (3 if kelime in sadelestir(baslik) else 0)
+                vurus.append((puan, "bolum", f"{os.path.basename(p)} › {baslik}", list(tampon), p))
+            for sat in satirlar:
+                if sat.startswith("##"):
+                    bolum_kapat(); baslik = sat.lstrip("#").strip(); tampon = []
+                else:
+                    tampon.append(sat)
+            bolum_kapat()
+    # v4 (24.10.2026): çok kelimeli soruda ya da birebir sonuç azsa ANLAMCA da ara.
+    # "müşteri mesaj teslim" gibi bir arama eskiden ifadeyi BİREBİR arıyor,
+    # kelimeler ayrı ayrı geçse de "bulunamadı" diyordu.
+    soru = " ".join(arg)
+    anlam = None
+    if len(arg) >= 2 or len(vurus) < 3:
+        anlam = anlam_sor({"q": soru, "tur": ["n", "g", "o", "i", "k", "a", "w", "t"],
+                           "k": 8, "alinti": 300}, zaman=3)
+    if not vurus:
+        if anlam:
+            anlam_bas(anlam, set(), baslik=f"birebir '{soru}' geçen yer yok — anlamca en yakınlar:")
+        else:
+            print(f"bulunamadı: {soru}")
+        return
+    vurus.sort(key=lambda v: -v[0])
+    basilan, bayt, kalan = 0, 0, []
+    for puan, tur, etiket, tampon, p in vurus:
+        if not tum and (basilan >= ARA_TAVAN_ADET or bayt >= ARA_TAVAN_BAYT):
+            kalan.append((tur, etiket)); continue
+        import io as _io
+        tampon_cikti = _io.StringIO(); eski = sys.stdout; sys.stdout = tampon_cikti
+        try:
+            if tur == "noron":
+                bas_noron(etiket)
+            else:
+                print(f"\n─── {etiket}   (kaynak sayfa, {len(tampon)} satır)")
+                print("\n".join(tampon[:40]).rstrip())
+                if len(tampon) > 40:
+                    print(f"    … {len(tampon)-40} satır daha — tamamı: {p}")
+        finally:
+            sys.stdout = eski
+        parca = tampon_cikti.getvalue()
+        if len(parca) > ARA_BOLUM_BAYT:
+            parca = parca[:ARA_BOLUM_BAYT].rsplit("\n", 1)[0] + \
+                f"\n    … (bölüm kısaltıldı — tamamı: {p or etiket['yol'] if tur == 'noron' else p})\n"
+        print(parca, end=""); basilan += 1; bayt += len(parca)
+    print(f"\n({basilan} bölüm/nöron basıldı" + (f", {len(kalan)} tane daha var" if kalan else "") + ")")
+    if kalan:
+        adlar = [(e["id"] if t == "noron" else e) for t, e in kalan[:25]]
+        print("   gösterilmeyenler: " + " · ".join(adlar) + (" …" if len(kalan) > 25 else ""))
+        print("   tamamı için: beyin ara <kelime> --tum   (dikkat: büyük olabilir)")
+    if anlam:
+        basilan_noron = {e["id"] for _, t, e, _, _ in vurus if t == "noron"}
+        anlam_bas(anlam, basilan_noron)
+
+def anlam_bas(anlam, haric, baslik="🔎 anlamca da yakın (kelime birebir geçmese de):"):
+    """`ara` için: anlam servisinin en yakın parçalarını tek satırlık işaretle bas."""
+    hepsi = None
+    satir = []
+    for pid, _skor, metin in anlam.get("sonuc", []):
+        tur, _, yer = pid.partition(":")
+        if tur == "n":
+            if yer in haric:
+                continue
+            hepsi = hepsi or noronlar()
+            n = hepsi.get(yer)
+            satir.append(f"   • nöron {yer} — {n['baslik'] if n else ''}   →  beyin not {yer}")
+        else:
+            satir.append(f"   • {kayit_etiketi(pid)}: {_kirp(metin, 200)}")
+    if satir:
+        print("\n" + baslik)
+        print("\n".join(satir[:8]))
+
+def k_not(arg):
+    if not arg:
+        print("kullanım: beyin not <id>"); return
+    hepsi = noronlar()
+    if arg[0] in hepsi:
+        bas_noron(hepsi[arg[0]]); return
+    # v3: konu dizini "wiki/ornek-sayfa.md" / "NORON.md" / mutlak yol verir
+    for aday in (arg[0], os.path.join(VAULT, arg[0])):
+        if os.path.isfile(aday):
+            print(f"─── {aday}")
+            print(oku(aday)); return
+    adaylar = sorted(glob.glob(os.path.join(VAULT, "**", f"*{arg[0]}*.md"), recursive=True))
+    if not adaylar:
+        print(f"bulunamadı: {arg[0]}"); return
+    if len(adaylar) > 1:
+        print(f"⚠️ {len(adaylar)} aday var; ilki basılıyor, diğerleri:")
+        for a in adaylar[1:6]:
+            print(f"     {os.path.relpath(a, VAULT)}")
+    print(f"─── {adaylar[0]}")
+    print(oku(adaylar[0]))
+
+def k_geri(arg):
+    if not arg:
+        print("kullanım: beyin geri <id>"); return
+    nid, hepsi, bulundu = arg[0], noronlar(), False
+    for m in hepsi.values():
+        for t, h in baglar(m["fm"]):
+            if h == nid:
+                print(f"  {t:<12} ← {m['id']}: {m['baslik']}"); bulundu = True
+    # eski [[bağlantı]] biçimi: -F ŞART — '[[' regex sanılınca GNU grep exit 2
+    # verir ve backlink HİÇ bulunmazdı (23.08 denetim bulgusu 5).
+    r = subprocess.run(["grep", "-rlF", f"[[{nid}", VAULT, "--include=*.md"],
+                       capture_output=True, text=True)
+    if r.returncode == 2:
+        print(f"  ⚠️ grep hatası: {r.stderr.strip()[:200]}")
+    elif r.stdout.strip():
+        print("  (eski [[bağlantı]] biçimiyle:)")
+        for s in r.stdout.strip().splitlines():
+            print(f"    {s}")
+        bulundu = True
+    if not bulundu:
+        print(f"backlink yok: {nid}")
+
+def k_liste(arg):
+    tur = arg[0] if arg else None
+    hepsi = noronlar()
+    for n in sorted(hepsi.values(), key=lambda x: (x["klasor"], x["id"])):
+        if tur and n["fm"].get("tur") != tur and n["klasor"] != tur:
+            continue
+        isaret = "⚠️" if bayat_mi(n["fm"]) else ("⛔" if yerine_gecen(n["fm"]) else " ")
+        print(f"{isaret} {n['klasor']:<6} {n['id']:<38} {n['baslik'][:60]}")
+    print(f"\n{len(hepsi)} nöron")
+
+def k_saglik(arg):
+    hepsi = noronlar()
+    sorun = {"boyut": [], "sema": [], "tetik": [], "bayat": [], "kirik": [],
+             "yetim": [], "cift": []}
+    for n in hepsi.values():
+        if n["govde_satir"] > MAX_SATIR:
+            sorun["boyut"].append(
+                f"{n['id']} (gövde {n['govde_satir']} satır, sınır {MAX_SATIR}) — böl")
+        for alan in ("id", "tur", "guncelleme", "gecerlilik"):
+            if alan not in n["fm"]:
+                sorun["sema"].append(f"{n['id']}: '{alan}' alanı eksik")
+        if n["fm"].get("tur") and n["fm"]["tur"] not in GECERLI_TURLER:
+            sorun["sema"].append(f"{n['id']}: tur '{n['fm']['tur']}' geçersiz ({'/'.join(GECERLI_TURLER)})")
+        gb = gecerlilik_bozuk(n["fm"])
+        if gb:
+            sorun["sema"].append(f"{n['id']}: {gb}")
+        if n["fm"].get("tur") in ("kural", "ders") and not n["fm"].get("tetik"):
+            sorun["tetik"].append(f"{n['id']}: tetik yok — hiç ateşlenemez")
+        for t in liste_ayir(n["fm"].get("tetik", "")):
+            if 0 < len(t) < 3:
+                sorun["tetik"].append(f"{n['id']}: tetik '{t}' 3 harften kısa — hiç eşleşmez")
+        if bayat_mi(n["fm"]):
+            sorun["bayat"].append(f"{n['id']}: geçerlilik {n['fm'].get('gecerlilik')} geçmiş")
+        for t, h in baglar(n["fm"]):
+            if t not in BAG_TURLERI:
+                sorun["sema"].append(f"{n['id']}: bilinmeyen bağ türü '{t}'")
+            if h not in hepsi and not os.path.exists(os.path.join(VAULT, "wiki", h + ".md")):
+                sorun["kirik"].append(f"{n['id']} → {h} (hedef yok)")
+    # Çift id: DOSYALARDAN tara — noronlar() sözlüğü çakışanı sessizce ezdiği
+    # için oradan bakmak ölü koddu (23.08 denetim bulgusu 4/7).
+    gorulen = {}
+    for p, nid in noron_dosyalari():
+        gorulen.setdefault(nid, []).append(p)
+    for nid, yollar in gorulen.items():
+        if len(yollar) > 1:
+            sorun["cift"].append(f"{nid}: {len(yollar)} dosyada — " +
+                                 ", ".join(os.path.relpath(y, VAULT) for y in yollar))
+    gelen = set()
+    for n in hepsi.values():
+        for _, h in baglar(n["fm"]):
+            gelen.add(h)
+    for n in hepsi.values():
+        if n["id"] not in gelen and not n["fm"].get("tetik"):
+            sorun["yetim"].append(f"{n['id']}: ne bağ ne tetik — hiç ulaşılamaz")
+
+    # v3: açık iş satırı tavanı + kapanmış satır + konu dizini hedefleri
+    # 08.09.2026 iki kör nokta kapatıldı (Oturum 7):
+    #  (1) yalnız is/acik.md taranıyordu; is/kucuk.md ("acik.md'nin devamı")
+    #      hiç bakılmıyordu ve içinde 1.217 ve 249 karakterlik iki satır vardı.
+    #  (2) `^\| (\S+) \|` ile başlamayan tablo satırı SESSİZCE atlanıyordu —
+    #      yani numarasız/uzun ilk hücreli satır denetimden tamamen kaçıyordu.
+    #      Artık `|` ile başlayan her satır ölçülür, numarasızlık da bildirilir.
+    sorun["is"] = []
+    for dosya in ("acik.md", "kucuk.md"):
+        yol = os.path.join(VAULT, "is", dosya)
+        if not os.path.exists(yol):
+            continue
+        for l in oku(yol).splitlines():
+            if not l.startswith("|"):
+                continue
+            hucre = [h.strip() for h in l.strip().strip("|").split("|")]
+            no = hucre[0] if hucre else ""
+            if no in ("#", "---") or set(no) <= set("-: "):
+                continue           # başlık ve ayraç satırı
+            etiket = f"{dosya} {no}" if no else f"{dosya} (numarasız satır)"
+            if len(l) > IS_SATIR_TAVANI:
+                sorun["is"].append(f"{etiket}: satır {len(l)} karakter (sınır {IS_SATIR_TAVANI}) — hikâyeyi is/ayrinti.md'ye taşı")
+            if not re.match(r"^\| \S+ \|", l):
+                sorun["is"].append(f"{etiket}: ilk hücre iş numarası değil — `| <no> | ... |` biçimine getir")
+            durum_h = sadelestir(hucre[3]) if len(hucre) >= 4 else ""
+            if "✅" in l or durum_h in ("kapandi", "cozuldu", "bitti", "tamam"):
+                sorun["is"].append(f"{etiket}: kapanmış görünüyor (✅ veya durum '{hucre[3] if len(hucre)>=4 else ''}') — listeden SİL, KAPANAN-MADDELER'e taşı")
+    sorun["konu"] = []
+    for tetikler, hedef, _ in konular():
+        yol = hedef if os.path.isabs(hedef) else os.path.join(VAULT, hedef)
+        if not os.path.exists(yol):
+            sorun["konu"].append(f"konu.tsv → {hedef} yok")
+        if not [t for t in tetikler if len(t) >= 3]:
+            sorun["konu"].append(f"konu.tsv → {hedef}: kullanılabilir tetik yok")
+
+    if arg and arg[0] == "--sayi-bayat":
+        print(len(sorun["bayat"])); return
+    if arg and arg[0] == "--cikis-kodu":
+        agir = len(sorun["sema"]) + len(sorun["kirik"]) + len(sorun["cift"])
+        sys.exit(1 if agir else 0)
+
+    print(f"NÖRON SAĞLIĞI — {len(gorulen)} nöron dosyası, {len(hepsi)} benzersiz id\n")
+    basliklar = {"boyut": "🔴 Çok büyük (bölünmeli)", "sema": "🔴 Şema hatası",
+                 "tetik": "⚠️ Tetik sorunu", "bayat": "⚠️ Bayat (geçerliliği geçmiş)",
+                 "kirik": "🔴 Kırık bağ", "yetim": "⚠️ Ulaşılamaz",
+                 "cift": "🔴 Çift kayıt (biri diğerini SESSİZCE gölgeliyor)",
+                 "is": "🔴 Açık iş listesi (v3 sözleşmesi)", "konu": "⚠️ Konu dizini"}
+    temiz = True
+    for k, baslik in basliklar.items():
+        if sorun[k]:
+            temiz = False
+            print(f"{baslik} — {len(sorun[k])}")
+            for s in sorun[k][:15]:
+                print(f"   {s}")
+            if len(sorun[k]) > 15:
+                print(f"   … {len(sorun[k])-15} tane daha")
+            print()
+    if temiz:
+        print("✓ ağ temiz")
+    # Eski düzenin kalıntısı kasa kökünde duruyor mu? (göç 23.08'de tamamlandı;
+    # bunlar geri gelirse iki rakip protokol demektir — o yüzden denetleniyor)
+    kalinti = [a for a in ("hot.md", "index.md", "WIKI.md", "giris.md", "CLAUDE.md")
+               if os.path.exists(os.path.join(VAULT, a))] + \
+              [a for a in ("wiki/yapilacaklar.md",)
+               if os.path.exists(os.path.join(VAULT, a))]
+    if kalinti:
+        print(f"\n🔴 Eski düzen kalıntısı: {', '.join(kalinti)} — arşive taşınmalı "
+              f"(rakip protokol/liste riski)")
+
+def ayna_reddi(ne):
+    """PC aynası salt okunur: tek yazma yeri sunucu (23.08 dersi — iki yazılabilir kopya
+    birbirini ezer). 26.10.2026 denetimi: koruma yalnız `ekle`'deydi; aynada `yeni`
+    şablonu basıp dosyayı aynaya yazmak da bir sonraki eşitlemede sessizce siliniyordu."""
+    print(f"⛔ bu kasa sunucunun SALT OKUNUR aynası — {ne} sunucuya yazılır: "
+          f"bash .claude/kancalar/beyin.sh …  (nöron dosyası: SSH ile sunucudaki kasada kural|ders/<id>.md)")
+    sys.exit(1)
+
+def k_yeni(arg):
+    nid = arg[0] if arg else "yeni-noron"
+    if AYNA:
+        ayna_reddi(f"nöron ({nid})")
+    print(f"""---
+id: {nid}
+tur: kural
+guncelleme: {bugun():%Y-%m-%d}
+gecerlilik: kalici
+tetik:
+bag:
+---
+# Tek cümlelik başlık — kuralın kendisi
+
+Gövde en fazla ~20 satır.
+
+**Neden:**
+**Kanıt:** """)
+
+def _kilit(f, al):
+    """Dosya kilidi: Linux'ta fcntl.flock; Windows'ta fcntl yok → msvcrt.locking
+    (dosyanın ilk baytı kilitlenir; kilitli bulunca bekleyip yeniden dener)."""
+    try:
+        import fcntl
+        fcntl.flock(f, fcntl.LOCK_EX if al else fcntl.LOCK_UN)
+        return
+    except ImportError:
+        pass
+    import msvcrt, time
+    konum = f.tell()
+    f.seek(0)
+    try:
+        if al:
+            for _ in range(200):          # en çok ~10 sn
+                try:
+                    msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1); break
+                except OSError:
+                    time.sleep(0.05)
+        else:
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+    finally:
+        f.seek(konum)
+
+def k_ekle(arg):
+    """Oturum notunu gunluk/<tarih>.md dosyasına EKLER — düzenlemez.
+
+    Eş zamanlı oturumlar birbirini ezemesin diye tek yazma biçimi budur.
+    Başlık kararı KİLİT ALTINDA, dosya boyutuna bakılarak verilir — kilitten
+    önce os.path.exists ile bakmak ilk-yazar yarışında başlığı çoğaltıyordu
+    (23.08 dayanıklılık testi: 16 turun 2'sinde çift başlık).
+    """
+    if not arg:
+        print("kullanım: beyin ekle <not metni>"); return
+    if AYNA:
+        ayna_reddi('not (bash .claude/kancalar/beyin.sh ekle "<not>")')
+    os.makedirs(os.path.join(VAULT, "gunluk"), exist_ok=True)
+    p = os.path.join(VAULT, "gunluk", f"{bugun():%Y-%m-%d}.md")
+    with open(p, "a", encoding="utf-8") as f:
+        _kilit(f, True)
+        if os.fstat(f.fileno()).st_size == 0:
+            f.write(f"# Günlük — {bugun():%d.%m.%Y}\n\n"
+                    f"> Sadece EKLENİR. Kalıcı kural/tuzak çıkarsa `beyin yeni` ile nöron aç.\n\n")
+        f.write(f"- [{bugun():%H:%M}] {' '.join(arg)}\n")
+        f.flush()
+        _kilit(f, False)
+    print(f"✓ eklendi: {os.path.relpath(p, VAULT)}")
+
+def k_son(_):
+    dosyalar = []
+    for alt in NORON_DIRS + ["is", "gunluk"]:
+        dosyalar += glob.glob(os.path.join(VAULT, alt, "*.md"))
+    for p in sorted(dosyalar, key=os.path.getmtime, reverse=True)[:12]:
+        t = datetime.datetime.fromtimestamp(os.path.getmtime(p), datetime.timezone.utc) + datetime.timedelta(hours=UTC_FARK)
+        print(f"{t:%d.%m %H:%M}  {os.path.relpath(p, VAULT)}")
+
+KOMUTLAR = {"giris": k_giris, "son72": k_son72, "ates": k_ates, "yol": k_yol,
+            "ara": k_ara, "is": k_is, "not": k_not, "geri": k_geri, "liste": k_liste,
+            "saglik": k_saglik, "yeni": k_yeni, "son": k_son, "ekle": k_ekle}
+
+if __name__ == "__main__":
+    try:
+        cmd = sys.argv[1] if len(sys.argv) > 1 else "yardim"
+        if cmd in KOMUTLAR:
+            KOMUTLAR[cmd](sys.argv[2:])
+        else:
+            print(__doc__.strip())
+            print("\nSözleşme: " + os.path.join(VAULT, "NORON.md"))
+        sys.stdout.flush()
+    except BrokenPipeError:
+        # `beyin ara ... | head` boruyu erken kapatınca traceback basma
+        try:
+            sys.stdout.close()
+        except Exception:
+            pass
+        os._exit(0)

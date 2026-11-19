@@ -1,0 +1,16 @@
+# ÖRNEK KÜME — ornek/ altındaki 6 uydurma nöron içindir. Kendi kasan için kendi kümeni yaz.
+# sütun1=cümle  sütun2=ZORUNLU (kaçarsa hata)  sütun3=KABUL EDİLEBİLİR (ne ödül ne ceza)
+# bu ikisinin dışında ateşlenen her nöron GÜRÜLTÜ sayılır.
+veritabanından şu kaydı sil	canli-veri-onay	yedek-once-al
+müşteri tablosuna drop table atacağım	canli-veri-onay
+veritabanı yedeği alalım mı	yedek-once-al	canli-veri-onay
+parolayı not dosyasına yazayım	sir-dosyaya-yazilmaz
+token'ı config dosyasına koyalım	sir-dosyaya-yazilmaz
+rapor saat kaçta gelsin	saat-yerel-soylenir
+fiyat filtresi yanlış sonuç veriyor	ondalik-ayrac-tuzagi
+testte grep -q bazen kalıyor	pipefail-grep-q
+merhaba nasılsın
+bu metni düzelt
+listeyi alfabetik sırala
+bugün hava çok güzel
+bir çay içelim mi

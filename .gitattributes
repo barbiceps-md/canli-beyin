@@ -1,0 +1,8 @@
+# Betikler Linux'ta ve Windows'ta (Git Bash) koşar: satır sonu her yerde LF.
+# core.autocrlf=true olan bir Windows klonu .sh ve uzantısız betikleri (hafiza/bin/beyin…) CRLF yapar;
+# bash CRLF'li betiği koşamaz, python ise sessizce koşar — fark edilmeden kayar.
+* text=auto eol=lf
+*.png binary
+*.gif binary
+*.npz binary
+*.pyc binary

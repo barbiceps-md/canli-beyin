@@ -1,0 +1,564 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+beyin-anlam — hafızanın ANLAM katmanı (Beyin v4, 24.10.2026)
+
+NEDEN VAR: `beyin ates` nöronları yalnız `tetik` sözcüğü mesajda birebir
+geçince getiriyordu. Kullanıcı günlük dille yazar; ölçümde kullanıcının
+ağzından yazılmış ~850 cümlede hedef kural doğal cümlede %29, dolaylı iş
+isteğinde %0,9 geliyordu. Bu servis çok dilli YEREL bir dil modeliyle
+metinleri anlamına göre karşılaştırır; hiçbir metin dışarı gitmez.
+
+İKİ YERDE AYNI KOD:
+  sunucu  — Unix soketi, işlemci (CPU), kasa ~/beyin (BEYIN_KASA). Sunucudaki
+            oturumlar bunu kullanır.
+  PC      — ikinci (Windows) bilgisayar: 127.0.0.1 TCP; kasanın SALT OKUNUR aynası
+            (araclar/beyin/kasa, esitle.py ile birkaç dakikada bir).
+            Kancaya DOĞRUDAN cevap verir: SSH yok → istem başına ~1,4 sn → ~0,1 sn.
+            Sorgular işlemcide (dizüstü: ekran kartı sürekli uyanık kalıp pili
+            ve başka uygulamaların belleğini yemesin); TOPLU dizinleme ayrı, kısa
+            ömürlü bir süreçte ekran kartında yapılır (BEYIN_ANLAM_TOPLU_CIHAZ).
+
+- Model bir kez yüklenir, bellekte durur. Kasa değiştikçe yalnız DEĞİŞEN
+  parçalar kodlanır (metin özeti → vektör önbelleği).
+- `beyin` buna sorar; servis yoksa `beyin` eski (tetik) yolla çalışır:
+  hafıza bu servise BAĞIMLI DEĞİLDİR.
+
+Dizinlenenler (tür önekiyle):
+  n: nöron (kural/, ders/)              g: günlük notu (gunluk/<tarih>.md satırı)
+  o: gece özeti bölümü (*-ozet.md)       i: açık iş satırı (is/acik.md)
+  k: küçük iş satırı (is/kucuk.md)       a: açık iş ayrıntısı (is/ayrinti.md ### no)
+  w: wiki bölümü (wiki/*.md ##)          t: proje tarihçesi bölümü
+
+İstek (tek satır):  {"q": "...", "tur": ["n"], "k": 20, "ozel": [...], "alinti": 300}
+                    {"islem": "yenile"} · {"islem": "durum"}
+                    KANCA <base64 kanca girdisi>   (PC: hazır kanca JSON'u ya da YOK döner)
+                    ESITLE                          (PC: aynayı hemen eşitle)
+"""
+import os, sys, re, io, json, glob, time, hashlib, threading, socket, socketserver, subprocess, base64
+
+PC = os.name == "nt"
+KOD_DIZIN = os.path.dirname(os.path.abspath(__file__))
+if PC:
+    _KOK = os.path.dirname(KOD_DIZIN)                         # araclar/beyin
+    for _k, _v in {"HF_HOME": os.path.join(_KOK, "hf"),
+                   "BEYIN_KASA": os.path.join(_KOK, "kasa"),
+                   "BEYIN_DIS_KAYNAK": os.path.join(_KOK, "kasa", "_tarihce"),
+                   "BEYIN_ANLAM_DIZIN": os.path.join(_KOK, "durum"),
+                   "BEYIN_ATES_KAYIT": os.path.join(_KOK, "durum", "beyin-ates.tsv"),
+                   "BEYIN_AYNA": "1", "BEYIN_ANLAM_KANCA": "1",
+                   "BEYIN_ANLAM_TOPLU_CIHAZ": "cuda"}.items():
+        os.environ.setdefault(_k, _v)
+os.environ.setdefault("HF_HOME", os.path.expanduser("~/beyin-arsiv/anlam/hf"))
+os.environ.setdefault("HF_HUB_OFFLINE", "1")                   # çalışırken ağa çıkma
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+
+VAULT = os.path.expanduser(os.environ.get("BEYIN_KASA") or "~/beyin")
+_ARSIV = os.path.expanduser(os.environ.get("BEYIN_ARSIV") or "~/beyin-arsiv")
+TARIHCE = os.path.expanduser((os.environ.get("BEYIN_DIS_KAYNAK") or "").split(":")[0]
+                             or os.path.join(_ARSIV, "proje-tarihcesi"))
+ADRES = os.environ.get("BEYIN_ANLAM_ADRES") or (
+    "tcp:127.0.0.1:7341" if PC else "unix:" + os.environ.get("BEYIN_ANLAM_SOKET", "/run/beyin-anlam/soket"))
+DURUM_DIZIN = os.path.expanduser(os.environ.get("BEYIN_ANLAM_DIZIN") or os.path.join(_ARSIV, "anlam"))
+IPLIK = int(os.environ.get("BEYIN_ANLAM_IPLIK", "6" if PC else "2"))
+CIHAZ = os.environ.get("BEYIN_ANLAM_CIHAZ", "cpu")
+TOPLU_CIHAZ = os.environ.get("BEYIN_ANLAM_TOPLU_CIHAZ", "")   # "cuda" → toplu kodlama ayrı süreçte GPU'da
+TOPLU_ESIK = 120          # bu kadar eksik parça varsa toplu yol
+KANCA = os.environ.get("BEYIN_ANLAM_KANCA") == "1"
+ESITLE_SN = 180           # PC: aynayı bu aralıkla sunucudan eşitle
+YENILEME_SN = 20          # kasa imzasını bu aralıkla yokla
+PARCA_KARAKTER = 1500     # modele giden metin tavanı (≈ 400-500 jeton)
+
+# pythonw (Windows, konsolsuz) altında stdout/stderr yoktur → günlük dosyasına yaz
+if sys.stdout is None or sys.stderr is None:
+    os.makedirs(DURUM_DIZIN, exist_ok=True)
+    sys.stdout = sys.stderr = open(os.path.join(DURUM_DIZIN, "beyin-anlam.log"), "a",
+                                   encoding="utf-8", buffering=1)
+for _a in (sys.stdout, sys.stderr):
+    try:
+        _a.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+# ── model ──────────────────────────────────────────────────────────────
+# Seçim ve eşikler ölçümle (test/anlam/kalibre3.py):
+# kullanıcının ağzından ~850 hedefli cümle (yarısı ayar, yarısı dokunulmamış sınav),
+# 50 sohbet mesajı (gürültü) ve eski 4 güvenlik kümesi (recall %100 şartı).
+_GOREV = ("Given a message from a user to their technical assistant, "
+          "retrieve the internal rules and pitfalls the assistant must know to handle it")
+ONEKLER = {   # modelin eğitildiği sorgu / metin önekleri
+    "intfloat/multilingual-e5-small": ("query: ", "passage: "),
+    "intfloat/multilingual-e5-base": ("query: ", "passage: "),
+    "intfloat/multilingual-e5-large-instruct": (f"Instruct: {_GOREV}\nQuery: ", ""),
+    "Qwen/Qwen3-Embedding-0.6B": (f"Instruct: {_GOREV}\nQuery:", ""),
+    "BAAI/bge-m3": ("", ""),
+}
+# model → ölçülmüş eşikler (test/anlam/kalibre3.py). Kendi kasanda yeniden ölçmen önerilir.
+# bge-m3, SINAV kümesinde (ayar yapılmadı): doğal mesajda hedef kural %50,5 tam gövdeyle,
+# %78,9 gövde ya da 🧭 başlıkla geldi (eski tetik: %28,9); dolaylı iş isteğinde %31,4
+# (eski %1,0); güvenlik ZORUNLU %100; sohbet mesajında gövde gürültüsü %4.
+# 📓 Z_KAYIT=3,8: geçmiş sorularının %45'inde hedef günlük notu geldi, sohbette %8 kayıt.
+AYARLAR = {
+    "BAAI/bge-m3": dict(Z_ANLAM=3.9, Z_TEYIT=1.0, HAM_GUCLU=99.0, TAVAN=3, Z_LISTE=2.0,
+                        LISTE_ADET=5, MIN_KELIME=4, Z_KAYIT=3.8, KAYIT_ADET=2),
+}
+# Karşılaştırma (aynı ~850 cümle, saf anlam, sınav kümesi, doğal R@1/R@5):
+# bge-m3 %50,5/%75,0 · e5-large-instruct %42,2/%70,6 · e5-base %43,6/%67,6 · Qwen3-0.6B %31,9/%53,9.
+# İşlemcide tek sorgu: bge-m3 89 ms · e5-large-i 218 ms · Qwen3 337 ms (dizüstü işlemci, 6 iş parçacığı).
+MODEL = os.environ.get("BEYIN_ANLAM_MODEL") or "BAAI/bge-m3"
+ONEK = ONEKLER.get(MODEL, ("", ""))
+AYAR = AYARLAR.get(MODEL, {})
+
+def kayit(*a):
+    print(time.strftime("%d.%m %H:%M:%S"), *a, flush=True)
+
+# ─────────────────────────────────────────────────────────── külliyat ────
+def oku(p):
+    try:
+        with open(p, encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return ""
+
+def frontmatter(metin):
+    m = re.match(r"^---[ \t]*\n(.*?)\n---[ \t]*\n?(.*)$", metin, re.S)
+    if not m:
+        return {}, metin
+    fm = {}
+    for s in m.group(1).splitlines():
+        if ":" in s:
+            k, _, v = s.partition(":")
+            fm[k.strip()] = v.strip()
+    return fm, m.group(2).lstrip("\n")
+
+def noron_metni(fm, govde):
+    """Nöronun modele giden biçimi: başlık + konular (tetik) + gövde.
+    24.10 ölçümü: tetiği eklemek isabeti artırdı (e5-base doğal R@1 42,9 → 45,8)."""
+    govde = re.sub(r"\n{2,}", "\n", govde).strip()
+    baslik = next((s.lstrip("#").strip() for s in govde.splitlines() if s.startswith("#")), "")
+    return f"{baslik}\nKonular: {fm.get('tetik', '')}\n{govde}"
+
+def bolumle(metin, seviye="## "):
+    """Markdown'u başlıklardan böl: [(başlık, gövde)]."""
+    out, baslik, tampon = [], "(giriş)", []
+    for s in metin.splitlines():
+        if s.startswith(seviye):
+            if any(x.strip() for x in tampon):
+                out.append((baslik, "\n".join(tampon).strip()))
+            baslik, tampon = s[len(seviye):].strip(), []
+        else:
+            tampon.append(s)
+    if any(x.strip() for x in tampon):
+        out.append((baslik, "\n".join(tampon).strip()))
+    return out
+
+def parcala(metin, tavan=PARCA_KARAKTER):
+    """Uzun metni paragraf sınırlarından ~tavan karakterlik parçalara böl."""
+    if len(metin) <= tavan:
+        return [metin]
+    out, tampon = [], ""
+    for par in re.split(r"\n\s*\n", metin):
+        if tampon and len(tampon) + len(par) > tavan:
+            out.append(tampon); tampon = ""
+        tampon = (tampon + "\n\n" + par) if tampon else par
+        while len(tampon) > tavan * 1.5:
+            out.append(tampon[:tavan]); tampon = tampon[tavan:]
+    if tampon.strip():
+        out.append(tampon)
+    return out
+
+def kulliyat():
+    """{parça_id: metin} — her çağrıda diskten taze kurulur."""
+    d = {}
+    for alt in ("kural", "ders"):
+        for p in glob.glob(os.path.join(VAULT, alt, "*.md")):
+            fm, govde = frontmatter(oku(p))
+            nid = fm.get("id") or os.path.basename(p)[:-3]
+            d["n:" + nid] = noron_metni(fm, govde)
+    for p in glob.glob(os.path.join(VAULT, "gunluk", "*.md")):
+        ad = os.path.basename(p)[:-3]
+        if ad.endswith("-ozet"):
+            for i, (b, g) in enumerate(bolumle(oku(p))):
+                for j, parca in enumerate(parcala(g)):
+                    d[f"o:{ad[:10]}#{i}.{j}"] = f"{ad[:10]} gece özeti — {b}\n{parca}"
+            continue
+        for i, s in enumerate(oku(p).splitlines()):
+            if s.startswith("- ["):
+                d[f"g:{ad}#{i}"] = s[2:][:PARCA_KARAKTER]
+    for dosya, onek in (("acik.md", "i"), ("kucuk.md", "k")):
+        for s in oku(os.path.join(VAULT, "is", dosya)).splitlines():
+            m = re.match(r"^\| *([0-9][0-9a-z]*) *\|(.*)$", s)
+            if m:
+                hucre = [h.strip() for h in m.group(2).strip().strip("|").split("|")]
+                d[f"{onek}:{m.group(1)}"] = f"Açık iş {m.group(1)}: " + " · ".join(hucre)
+    for b, g in bolumle(oku(os.path.join(VAULT, "is", "ayrinti.md")), "### "):
+        no = b.split()[0] if b.split() else b
+        for j, parca in enumerate(parcala(g)):
+            d[f"a:{no}#{j}"] = f"Açık iş {no} ayrıntısı\n{parca}"
+    for kok, onek in ((os.path.join(VAULT, "wiki"), "w"), (TARIHCE, "t")):
+        for p in glob.glob(os.path.join(kok, "*.md")):
+            ad = os.path.basename(p)[:-3]
+            _, govde = frontmatter(oku(p))
+            for i, (b, g) in enumerate(bolumle(govde)):
+                for j, parca in enumerate(parcala(g)):
+                    d[f"{onek}:{ad}#{i}.{j}"] = f"{ad} — {b}\n{parca}"
+    return d
+
+def imza(yalniz_noron=False):
+    """Kasanın değişip değişmediğini ucuzca anla: ilgili dosyaların (ad, mtime, boyut)."""
+    h = hashlib.sha1()
+    kaliplar = ("kural/*.md", "ders/*.md") if yalniz_noron else \
+               ("kural/*.md", "ders/*.md", "gunluk/*.md", "is/*.md", "wiki/*.md")
+    yollar = [p for k in kaliplar for p in glob.glob(os.path.join(VAULT, k))]
+    if not yalniz_noron:
+        yollar += glob.glob(os.path.join(TARIHCE, "*.md"))
+    for p in sorted(yollar):
+        try:
+            st = os.stat(p)
+            h.update(f"{p}{st.st_mtime_ns}{st.st_size}".encode())
+        except OSError:
+            pass
+    return h.hexdigest()
+
+# ───────────────────────────────────────────────────────────── dizin ────
+class Dizin:
+    """Model + vektör önbelleği + tür başına matris. Aramalar `anlik`
+    nesnesini okur; yenileme yeni nesne kurup tek atamayla değiştirir."""
+
+    def __init__(self, cihaz=CIHAZ):
+        import numpy as np, torch
+        from sentence_transformers import SentenceTransformer
+        torch.set_num_threads(IPLIK)
+        if cihaz.startswith("cuda") and not torch.cuda.is_available():
+            cihaz = "cpu"
+        self.cihaz = cihaz
+        self.np = np
+        t = time.time()
+        self.model = SentenceTransformer(
+            MODEL, device=cihaz, local_files_only=True,
+            model_kwargs={"dtype": torch.float16 if cihaz.startswith("cuda") else torch.float32})
+        self.model.max_seq_length = 512
+        kayit(f"model yüklendi: {MODEL} · {cihaz} ({time.time()-t:.1f}s)")
+        self.kilit = threading.Lock()          # model tek iş parçacığından kullanılsın
+        self.yenile_kilit = threading.Lock()
+        slug = re.sub(r"[^a-z0-9]+", "-", MODEL.lower())
+        self.onbellek_yol = os.path.join(DURUM_DIZIN, slug + ".npz")
+        self.onbellek = {}                     # metin özeti → float16 vektör
+        self._onbellek_yukle()
+        self.anlik = None
+        self.son_imza = None
+        self.hazir_turler = set()
+        self.son_yenileme = 0.0
+        self._son_sorgu = {}
+
+    def _ozet(self, metin):
+        return hashlib.sha1((MODEL + "\x00" + metin).encode()).hexdigest()[:20]
+
+    def _onbellek_yukle(self):
+        try:
+            z = self.np.load(self.onbellek_yol, allow_pickle=False)
+            self.onbellek = dict(zip(z["anahtar"].tolist(), z["vektor"]))
+            kayit(f"önbellek: {len(self.onbellek)} vektör")
+        except Exception:
+            self.onbellek = {}
+
+    def _onbellek_yaz(self, kullanilan):
+        np = self.np
+        anahtar = [k for k in kullanilan if k in self.onbellek]
+        if not anahtar:
+            return
+        os.makedirs(DURUM_DIZIN, exist_ok=True)
+        gecici = self.onbellek_yol + ".tmp.npz"
+        np.savez(gecici, anahtar=np.array(anahtar), vektor=np.stack([self.onbellek[k] for k in anahtar]))
+        os.replace(gecici, self.onbellek_yol)
+
+    def kodla(self, metinler, onek):
+        with self.kilit:
+            v = self.model.encode([onek + m for m in metinler], batch_size=16,
+                                  normalize_embeddings=True, convert_to_numpy=True)
+        return v.astype("float16")
+
+    def yenile(self, zorla=False):
+        """Değişen parçaları kodla, yeni anlık görüntüyü kur."""
+        with self.yenile_kilit:
+            yeni_imza = imza()
+            if not zorla and yeni_imza == self.son_imza:
+                return False
+            parcalar = kulliyat()
+            ozetler = {pid: self._ozet(m) for pid, m in parcalar.items()}
+            eksik = sorted(pid for pid in parcalar if ozetler[pid] not in self.onbellek)
+            t = time.time()
+            if TOPLU_CIHAZ and len(eksik) >= TOPLU_ESIK:
+                # Çok parça eksik (ilk kurulum, model değişimi): GPU'lu kısa ömürlü süreç
+                # kodlar, önbelleği diske yazar ve ÇIKAR — ekran kartı serbest kalır.
+                kayit(f"{len(eksik)} parça eksik → toplu kodlama ({TOPLU_CIHAZ}, ayrı süreç)")
+                self._onbellek_yaz(set(self.onbellek))
+                ortam = dict(os.environ, BEYIN_ANLAM_CIHAZ=TOPLU_CIHAZ, BEYIN_ANLAM_TOPLU_CIHAZ="")
+                try:
+                    subprocess.run([sys.executable, os.path.abspath(__file__), "--dizinle"], env=ortam,
+                                   timeout=3600, creationflags=0x08000000 if PC else 0)
+                except Exception as e:
+                    kayit(f"toplu kodlama hatası: {e}")
+                self._onbellek_yukle()
+                eksik = sorted(pid for pid in parcalar if ozetler[pid] not in self.onbellek)
+            # Önce nöron + açık iş (ateşleme bunlara bakar) → hemen yayına al; kalabalık
+            # türler arkadan. (İlk sürümde bu sıra 8'li dilim sınırına bağlıydı; 430 nöron
+            # 8'e bölünmediği için "hazır" anı hiç gelmiyordu — 24.10 denemesinde yakalandı.)
+            oncelik = [p for p in eksik if p[0] in "ni"]
+            geri = [p for p in eksik if p[0] not in "ni"]
+            D = 8      # küçük dilim: model kilidi o arada gelen istemi uzun bekletmesin
+            for grup, kismi in ((oncelik, True), (geri, False)):
+                for i in range(0, len(grup), D):
+                    dilim = grup[i:i + D]
+                    for p, v in zip(dilim, self.kodla([parcalar[p] for p in dilim], ONEK[1])):
+                        self.onbellek[ozetler[p]] = v
+                    if (i // D) % 50 == 49:
+                        self._onbellek_yaz(set(self.onbellek))
+                        kayit(f"… {i + D}/{len(grup)} parça")
+                if grup and kismi and self.anlik is None:
+                    self._kur(parcalar, ozetler, kismi=True)
+                    kayit(f"nöron + açık iş hazır ({time.time()-t:.1f}s)")
+            if eksik:
+                kayit(f"{len(eksik)} parça kodlandı ({time.time()-t:.1f}s)")
+            self._kur(parcalar, ozetler)
+            kullanilan = set(ozetler.values())
+            self.onbellek = {k: v for k, v in self.onbellek.items() if k in kullanilan}
+            if eksik or zorla:
+                self._onbellek_yaz(kullanilan)
+            self.son_imza = yeni_imza
+            self.son_yenileme = time.time()
+            return True
+
+    def _kur(self, parcalar, ozetler, kismi=False):
+        np = self.np
+        ids, M = {}, {}
+        for pid in sorted(parcalar):
+            if ozetler[pid] in self.onbellek:
+                ids.setdefault(pid[0], []).append(pid)
+        for tur, liste in ids.items():
+            M[tur] = np.stack([self.onbellek[ozetler[p]] for p in liste]).astype("float32")
+        sira = {p: i for liste in ids.values() for i, p in enumerate(liste)}
+        self.anlik = {"ids": ids, "M": M, "sira": sira, "metin": {p: parcalar[p] for p in sira}}
+        self.hazir_turler = (set(ids) & {"n", "i"}) if kismi else set(ids)
+
+    def ara(self, soru, turler=("n",), k=20, ozel=(), alinti=0):
+        """En yakın k parça + tür başına (ortalama, sapma) + istenen parçaların skoru.
+
+        Neden istatistik: e5 ailesinde benzerlikler dar bir bantta (≈0,75-0,90)
+        toplanır; "tamam devam et" gibi boş bir mesaj da her nörona 0,78 benzer.
+        Ayırt edici olan en iyinin KALABALIKTAN ne kadar ayrıldığı:
+        z = (skor - ortalama) / sapma."""
+        np = self.np
+        an = self.anlik
+        if an is None:
+            return None, {}, {}
+        # Aynı istem için nöron + kayıt diye iki sorgu gelir: kodlamayı bir kez yap (~80 ms).
+        anahtar = soru[:PARCA_KARAKTER]
+        q = self._son_sorgu.get(anahtar)
+        if q is None:
+            q = self.kodla([anahtar], ONEK[0])[0].astype("float32")
+            self._son_sorgu = {anahtar: q}
+        sonuc, ist, oz = [], {}, {}
+        for tur in turler:
+            if tur not in an["M"]:
+                continue
+            s = an["M"][tur] @ q
+            ist[tur] = [round(float(s.mean()), 5), round(float(s.std()) or 1e-6, 5)]
+            for i in np.argsort(-s)[:k]:
+                pid = an["ids"][tur][i]
+                kayit_ = [pid, round(float(s[i]), 4)]
+                if alinti:
+                    kayit_.append(an["metin"][pid][:alinti])
+                sonuc.append(kayit_)
+            for pid in ozel:
+                if pid.startswith(tur + ":") and pid in an["sira"]:
+                    oz[pid] = round(float(s[an["sira"][pid]]), 4)
+        sonuc.sort(key=lambda x: -x[1])
+        return sonuc[:k], ist, oz
+
+    def soru(self, istek):
+        """`beyin`in anlam_sor sözleşmesi: hazır değilse None."""
+        turler = istek.get("tur") or ["n"]
+        if self.anlik is None or not set(turler) & self.hazir_turler:
+            return None
+        sonuc, ist, oz = self.ara(str(istek.get("q", "")), turler, int(istek.get("k", 20)),
+                                  istek.get("ozel") or (), int(istek.get("alinti", 0)))
+        return {"hazir": True, "sonuc": sonuc, "ist": ist, "ozel": oz, "ayar": AYAR}
+
+# ─────────────────────────────────────────────── PC: kancaya doğrudan cevap ────
+# 26.10.2026: bu başlık yalnız PC'de basılır (servis sunucuda kurulu değil). PC'de `beyin` komutu
+# yok; aşağıdaki `beyin ara/is/not` ipuçlarının PC'deki karşılığı başlıkta bir kez söylenir.
+KANCA_BASLIK = ("⚡ Hafızadan bu isteğe otomatik gelenler (kural/tuzak nöronu = uy; "
+                "📓 kayıt = geçmişten ilgili not; 🧭/📎 = gerekirse aç). Bu PC'de "
+                "`beyin ara|is|not …` = `bash .claude/kancalar/beyin.sh ara|is|not …`:\n\n")
+
+class Kanca:
+    """`beyin` kodunu bu süreçte modül olarak çalıştırır: kancanın yaptığının
+    (kanca-ates.sh → beyin ates) aynısı, ama SSH'siz ve dosyaları her istemde
+    yeniden okumadan."""
+
+    def __init__(self):
+        import importlib.machinery, importlib.util
+        yol = os.environ.get("BEYIN_KOD") or os.path.join(KOD_DIZIN, "beyin")
+        yukleyici = importlib.machinery.SourceFileLoader("beyin_kod", yol)
+        spec = importlib.util.spec_from_loader("beyin_kod", yukleyici)
+        self.B = importlib.util.module_from_spec(spec)
+        yukleyici.exec_module(self.B)
+        self.B.anlam_sor = lambda istek, zaman=None: DIZIN.soru(istek) if DIZIN else None
+        self._asil_noronlar = self.B.noronlar
+        self._onb, self._onb_imza = None, None
+        self.B.noronlar = self._noronlar
+        self.kilit = threading.Lock()
+        self._son_uyari = 0.0
+
+    def _noronlar(self):
+        im = imza(yalniz_noron=True)
+        if im != self._onb_imza:
+            self._onb, self._onb_imza = self._asil_noronlar(), im
+            self.B._IDF, self.B._METINLER = None, None      # nadirlik ağırlıkları da tazelensin
+        return self._onb
+
+    def calistir(self, girdi):
+        try:
+            istem = (json.loads(girdi).get("prompt") or "")[:20000]
+        except Exception:
+            return "HATA girdi okunamadı"       # kanca sunucu yoluna düşsün
+        if not istem.strip():
+            return "YOK"
+        with self.kilit:
+            tampon = io.StringIO()
+            eski = sys.stdout
+            os.environ["BEYIN_KAYIT"] = "1"
+            try:
+                sys.stdout = tampon
+                self.B.k_ates([istem])
+            finally:
+                sys.stdout = eski
+                os.environ.pop("BEYIN_KAYIT", None)
+        cikti = tampon.getvalue()
+        bos = not cikti.strip() or "ateşlenen nöron yok" in cikti
+        # Sessiz bayatlama olmasın: ayna uzun süre eşitlenemediyse (PC çevrimdışı, SSH
+        # anahtarı bozuk…) bunu SÖYLE — en fazla 2 saatte bir, istem boş olsa da.
+        uyari = ""
+        gecen = time.time() - SON_ESITLEME_OK if SON_ESITLEME_OK else None
+        if gecen is not None and gecen > 6 * 3600 and time.time() - self._son_uyari > 2 * 3600:
+            self._son_uyari = time.time()
+            uyari = (f"⚠️ Hafıza aynası {int(gecen // 3600)} saattir sunucuyla eşitlenemedi — en yeni notlar "
+                     f"eksik olabilir (elle: `python araclar/beyin/kod/esitle.py`).\n\n")
+        if bos and not uyari:
+            return "YOK"
+        return json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
+                                                  "additionalContext": uyari + ("" if bos else KANCA_BASLIK + cikti)},
+                           "suppressOutput": True})          # ASCII çıkış: Git Bash borusu güvenli
+
+# ──────────────────────────────────────────────────────────── sunucu ────
+DIZIN = None
+KANCA_ISLEYICI = None
+ESITLE_OLAY = threading.Event()
+SON_ESITLEME_OK = None      # PC: son BAŞARILI ayna eşitlemesi (time.time())
+
+class Isleyici(socketserver.StreamRequestHandler):
+    def handle(self):
+        t = time.time()
+        satir = self.rfile.readline(4_000_000).decode("utf-8", "replace").strip()
+        try:
+            if satir.startswith(("KANCA ", "KANCAJ ")):
+                # KANCAJ: kanca girdisi (tek satır JSON) olduğu gibi — PC kanca betiği
+                # dış program (base64, timeout) çalıştırmasın diye (Git Bash'te her biri ~50 ms).
+                if KANCA_ISLEYICI is None:
+                    cevap = "HATA kanca kapalı"
+                else:
+                    ham = satir[7:] if satir.startswith("KANCAJ ") else \
+                        base64.b64decode(satir[6:]).decode("utf-8", "replace")
+                    cevap = KANCA_ISLEYICI.calistir(ham)
+                self.wfile.write((cevap + "\n").encode("utf-8"))
+                return
+            if satir == "ESITLE":
+                ESITLE_OLAY.set()
+                self.wfile.write(b"TAMAM\n")
+                return
+            istek = json.loads(satir or "{}")
+            if istek.get("islem") == "yenile":
+                DIZIN.yenile()
+                cevap = {"hazir": DIZIN.anlik is not None, "turler": sorted(DIZIN.hazir_turler)}
+            elif istek.get("islem") == "durum":
+                an = DIZIN.anlik or {"ids": {}}
+                cevap = {"hazir": DIZIN.anlik is not None, "model": MODEL, "cihaz": DIZIN.cihaz,
+                         "parca": {t_: len(v) for t_, v in an["ids"].items()},
+                         "turler": sorted(DIZIN.hazir_turler), "son_yenileme": DIZIN.son_yenileme}
+            else:
+                cevap = DIZIN.soru(istek) or {"hazir": False, "sonuc": []}
+        except Exception as e:
+            cevap = {"hazir": False, "hata": str(e)[:200]}
+        cevap["ms"] = int((time.time() - t) * 1000)
+        try:
+            self.wfile.write((json.dumps(cevap, ensure_ascii=False) + "\n").encode("utf-8"))
+        except Exception:
+            pass
+
+def yenileme_dongusu():
+    global SON_ESITLEME_OK
+    son_esitleme = 0.0
+    if KANCA:
+        SON_ESITLEME_OK = time.time()          # açılışta saymaya başla (ilk deneme hemen)
+    while True:
+        if KANCA and (ESITLE_OLAY.is_set() or time.time() - son_esitleme > ESITLE_SN):
+            ESITLE_OLAY.clear()
+            son_esitleme = time.time()
+            try:
+                r = subprocess.run([sys.executable, os.path.join(KOD_DIZIN, "esitle.py"), "--sessiz"],
+                                   timeout=300, creationflags=0x08000000 if PC else 0)
+                if r.returncode == 0:
+                    SON_ESITLEME_OK = time.time()
+                else:
+                    kayit(f"eşitleme başarısız (çıkış {r.returncode}) — son başarılı "
+                          f"{int((time.time() - SON_ESITLEME_OK) // 60)} dk önce")
+            except Exception as e:
+                kayit(f"eşitleme hatası: {e}")
+        try:
+            DIZIN.yenile()
+        except Exception as e:
+            kayit(f"yenileme hatası: {e}")
+        ESITLE_OLAY.wait(YENILEME_SN)
+
+def sunucu_kur():
+    tur, _, yer = ADRES.partition(":")
+    if tur == "tcp":
+        konak, _, port = yer.rpartition(":")
+        sinif = type("TcpSunucu", (socketserver.ThreadingMixIn, socketserver.TCPServer),
+                     {"daemon_threads": True, "allow_reuse_address": not PC})
+        return sinif((konak, int(port)), Isleyici)          # Windows'ta ikinci kopya bağlanamaz
+    os.makedirs(os.path.dirname(yer), exist_ok=True)
+    try:
+        os.unlink(yer)
+    except FileNotFoundError:
+        pass
+    sinif = type("UnixSunucu", (socketserver.ThreadingMixIn, socketserver.UnixStreamServer),
+                 {"daemon_threads": True})
+    s = sinif(yer, Isleyici)
+    os.chmod(yer, 0o600)
+    return s
+
+def main():
+    global DIZIN, KANCA_ISLEYICI
+    try:
+        sunucu = sunucu_kur()             # önce adresi al: ikinci kopya modeli boşuna yüklemesin
+    except OSError as e:
+        kayit(f"adres kullanımda ({ADRES}) — başka bir kopya çalışıyor olmalı: {e}")
+        return
+    if KANCA:
+        KANCA_ISLEYICI = Kanca()          # model yüklenirken bile tetik yolu hemen hizmette
+    kayit(f"dinliyor: {ADRES}")
+    threading.Thread(target=sunucu.serve_forever, daemon=True).start()
+    DIZIN = Dizin()
+    yenileme_dongusu()
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--dizinle":
+        # Tek seferlik: eksikleri kodla, önbelleği yaz, çık (toplu yol ve kurulum)
+        DIZIN = Dizin(); DIZIN.yenile(zorla=True)
+        kayit("dizin: " + json.dumps({t: len(v) for t, v in DIZIN.anlik["ids"].items()}))
+    else:
+        main()

@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# beyin-canli — kasadan Canlı Beyin sayfasını üretir (kendi hafızanın canlı görünümü).
+#
+#   beyin-canli                  → $BEYIN_ARSIV/canli-beyin/ (index.html + beyin.css + beyin.js + veri.js)
+#   beyin-canli --sayfa <klasör> → başka bir klasöre
+#
+# Çekirdekte üç yıldız olur: Kurallar (~/.claude/CLAUDE.md varsa) · Oturum girişi (`beyin giris`) · Konu dizini.
+# Bilinen sırlar listesi (~/.beyin-sirlar.txt ya da BEYIN_SIRLAR) varsa o dizeler de maskelenir.
+# ⚠️ Çıktı hafızanın TAM METNİNİ içerir: herkese açık bir yere koyma, depoya gönderme.
+set -uo pipefail
+H="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+KASA="${BEYIN_KASA:-$HOME/beyin}"
+HEDEF="${BEYIN_ARSIV:-$HOME/beyin-arsiv}/canli-beyin"
+EK=()
+[ -f "$HOME/.claude/CLAUDE.md" ] && EK+=(--kurallar "$HOME/.claude/CLAUDE.md")
+SIRLAR="${BEYIN_SIRLAR:-$HOME/.beyin-sirlar.txt}"
+[ -s "$SIRLAR" ] && EK+=(--sirlar "$SIRLAR")
+[ -d "$HOME/.claude/projects" ] && EK+=(--oturumlar "$HOME/.claude/projects")
+for a in "$@"; do [ "$a" = "--sayfa" ] && HEDEF=""; done
+yol() { command -v cygpath >/dev/null 2>&1 && cygpath -w "$1" || echo "$1"; }   # Windows Python'a Windows yolu
+ARG=()
+for a in "${EK[@]+"${EK[@]}"}"; do case "$a" in /*) ARG+=("$(yol "$a")") ;; *) ARG+=("$a") ;; esac; done
+export PYTHONUTF8=1 BEYIN_ANLAM="${BEYIN_ANLAM:-0}"
+exec python3 "$(yol "$H/../canli/uret.py")" "$(yol "$KASA")" --giris ${HEDEF:+--sayfa "$(yol "$HEDEF")"} "${ARG[@]+"${ARG[@]}"}" "$@"

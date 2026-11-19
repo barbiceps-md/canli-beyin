@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# durum — ÖLÇÜLEN güncel durum. Hiçbir yere yazılmaz, her çağrıda taze üretilir.
+#
+# NEDEN VAR: elle yazılan durum özeti (kaç kayıt var, yedek koştu mu, ne
+# bekliyor) sürekli bayatlar. Ölçülebilen hiçbir şey hafızaya yazılmaz —
+# buradan okunur.
+#
+# Buradaki ölçümler geneldir (disk, kasa sürümleme, açık iş, nöron sağlığı).
+# Kendi işine özgü ölçümleri <kasa>/durum-ek.sh dosyasına yaz; bu betik onu
+# kaynak olarak okur. Orada iki diziye ekleme yapabilirsin:
+#   EK+=("Yedek    : 4 saat önce")          → tabloya satır
+#   UYARI+=("🔴 son yedek 40 saat önce")   → DİKKAT listesine
+# Örnek: ornek/durum-ek.sh
+#
+# Kullanım: durum          tam tablo
+#           durum kisa     tek satırlık özet
+set -uo pipefail
+export LC_ALL=C.UTF-8
+
+BEYIN="${BEYIN_KASA:-$HOME/beyin}"
+FARK="${BEYIN_UTC_FARK:-3}"
+KOK="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+KISA="${1:-}"
+UYARI=()
+EK=()
+
+yerel_saat() { date -u -d "+$FARK hours" "+%d.%m.%Y %H:%M"; }
+yas_saat() { # dosya kaç saat önce değişti
+  local f="$1"; [ -e "$f" ] || { echo "-"; return; }
+  echo $(( ( $(date +%s) - $(stat -c %Y "$f") ) / 3600 ))
+}
+sayi() { # yalnız rakamsa geçir; boş/hata metni → boş (boş değer [ -gt ]
+  # testini patlatır, hata metni sessizce yutulur)
+  case "${1:-}" in ''|*[!0-9]*) echo "" ;; *) echo "$1" ;; esac
+}
+
+# ── 1. Sistem ───────────────────────────────────────────────────────────────
+DISK=$(df -h "$HOME" 2>/dev/null | awk 'NR==2{print $5}')
+DISK_N=$(sayi "${DISK%\%}")
+[ -n "$DISK_N" ] && [ "$DISK_N" -ge 85 ] && UYARI+=("🔴 disk %$DISK_N")
+
+# ── 2. Kasa sürümleme ───────────────────────────────────────────────────────
+if [ ! -d "$BEYIN" ]; then
+  KASA="🔴 kasa yok ($BEYIN)"
+  UYARI+=("🔴 kasa klasörü yok: $BEYIN — kur.sh çalıştır")
+elif [ -d "$BEYIN/.git" ]; then
+  BEKLEYEN=$(git -C "$BEYIN" status --porcelain 2>/dev/null | wc -l)
+  SON_C=$(sayi "$(git -C "$BEYIN" log -1 --format=%ct 2>/dev/null)")
+  if [ -n "$SON_C" ]; then
+    C_YAS=$(( ( $(date +%s) - SON_C ) / 3600 ))
+    KASA="son sürüm ${C_YAS} saat önce · bekleyen $BEKLEYEN dosya"
+    # Oturum sonu kancası her oturumda sürümler; bekleyen değişiklik bir
+    # günden eskiyse kanca sessizce çalışmıyor demektir.
+    [ "$BEKLEYEN" -gt 0 ] && [ "$C_YAS" -gt 24 ] && \
+      UYARI+=("🔴 kasada $BEKLEYEN dosya ${C_YAS} saattir sürümlenmedi — oturum sonu kancası çalışıyor mu?")
+  else
+    KASA="henüz sürüm yok · bekleyen $BEKLEYEN dosya"
+  fi
+else
+  KASA="⚠️ git deposu değil (sürümlenmiyor)"
+  UYARI+=("⚠️ kasa git deposu değil — silinen nöron geri getirilemez")
+fi
+
+# ── 3. Açık işler ───────────────────────────────────────────────────────────
+IS_DOSYA="$BEYIN/is/acik.md"
+if [ -f "$IS_DOSYA" ]; then
+  # `|| true`: grep -c eşleşme yokken hem 0 basar hem exit 1 döner; `|| echo 0`
+  # kullanmak çıktıyı "0\n0" yapıp tabloyu bozar
+  IS_ACIK=$(grep -c '^| *[0-9]' "$IS_DOSYA" 2>/dev/null || true)
+  IS_BEKLEYEN=$(grep -c '^| *[0-9].*bekliyor' "$IS_DOSYA" 2>/dev/null || true)
+  IS_ACIK=$(sayi "$IS_ACIK"); IS_BEKLEYEN=$(sayi "$IS_BEKLEYEN")
+  IS_ACIK="${IS_ACIK:-0}"; IS_BEKLEYEN="${IS_BEKLEYEN:-0}"
+else
+  IS_ACIK="-"; IS_BEKLEYEN="-"
+fi
+
+# ── 4. Beyin sağlığı ────────────────────────────────────────────────────────
+NORON=$(find "$BEYIN/kural" "$BEYIN/ders" -name '*.md' 2>/dev/null | wc -l)
+BAYAT=$("$KOK/bin/beyin" saglik --sayi-bayat 2>/dev/null || echo "?")
+
+# "bayat 0" tek başına bir şey söylemez (nöronların çoğu "kalici"). Asıl soru:
+# hafıza istemlere bir şey getiriyor mu? Ateşleme kaydından son 7 gün.
+ATES_LOG="${BEYIN_ATES_KAYIT:-${BEYIN_ARSIV:-$HOME/beyin-arsiv}/beyin-ates.tsv}"
+ATES_OZET="kayıt henüz yok"
+if [ -s "$ATES_LOG" ]; then
+  ESIK=$(date -u -d "+${FARK} hours -7 days" '+%Y-%m-%d')
+  ATES_OZET=$(awk -F'\t' -v e="$ESIK" '$1>=e {n++; if ($3!="" || $4!="") g++; if ($2=="anlam") a++}
+    END {if (n) printf "7 günde %d istem · %%%d'"'"'ine nöron geldi · %%%d anlam yolu", n, g*100/n, a*100/n;
+         else print "7 günde istem yok"}' "$ATES_LOG")
+fi
+
+# ── 5. İşe özgü ölçümler (isteğe bağlı) ─────────────────────────────────────
+if [ -f "$BEYIN/durum-ek.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$BEYIN/durum-ek.sh" || UYARI+=("⚠️ durum-ek.sh hata verdi — ölçümleri eksik olabilir")
+fi
+
+# ── Çıktı ───────────────────────────────────────────────────────────────────
+if [ "$KISA" = "kisa" ]; then
+  printf 'Açık iş %s · nöron %s · bayat %s · disk %s · uyarı %s\n' \
+    "$IS_ACIK" "$NORON" "$BAYAT" "${DISK:-?}" "${#UYARI[@]}"
+  exit 0
+fi
+
+echo "╭─ DURUM — $(yerel_saat) ─────────────────────────────────"
+echo "│ Sistem   : disk ${DISK:-?}"
+echo "│ Kasa     : $KASA"
+for s in "${EK[@]+"${EK[@]}"}"; do echo "│ $s"; done
+echo "│ Açık iş  : $IS_ACIK madde · beklemede $IS_BEKLEYEN"
+echo "│ Beyin    : $NORON nöron · bayat $BAYAT · ateşleme: $ATES_OZET"
+echo "╰──────────────────────────────────────────────────────────"
+
+if [ ${#UYARI[@]} -gt 0 ]; then
+  echo "DİKKAT:"
+  printf '  %s\n' "${UYARI[@]}"
+else
+  echo "✓ öne çıkan uyarı yok"
+fi
