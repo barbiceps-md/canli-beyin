@@ -36,7 +36,7 @@ Hafıza çekirdeği ile Canlı Beyin görselleştirmesi tek depoda, tek kuruluml
 - Bağlantıyla açılış: `?gorunum=yorunge|noral`, `?ac=<kimlik>`.
 - Ekran görüntüleri yenilendi (eskileri v4 öncesi görünümdendi), dönen beyin GIF'i eklendi.
 
-**Testler**: çekirdek takımı örnek kasada koşar (Windows'ta da), üreticiye 18 test eklendi.
+**Testler**: çekirdek takımı örnek kasada koşar (Windows'ta da), üreticiye 19 test eklendi.
 
 ---
 

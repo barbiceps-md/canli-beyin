@@ -212,16 +212,27 @@ class KenarDurumlar(Temel):
 
 
 class BuyukKlasor(Temel):
-    def test_2000_not_makul_surede(self):
-        k = os.path.join(self.d, "buyuk")
-        for i in range(2000):
-            yaz(k, "n%04d.md" % i, "---\nalan: a%d\n---\n# Not %d\n\n[[n%04d]] [[n%04d]]\n" % (i % 7, i, (i * 7 + 1) % 2000, (i * 13 + 5) % 2000))
+    def test_2000_not_yerlesimi_makul_surede(self):
+        """Yerleşim eskiden O(n²)·320 adımdı (500 not ~5 dk). Yalnız yerleşim ölçülür: dosya açma süresi makineye
+        (ör. Windows'ta virüs tarayıcısının yeni dosyaları taraması) bağlı, üreticiye değil."""
+        n = 2000
+        D = [{"id": "n%04d" % i, "katman": "arsiv" if i % 10 == 0 else "canli", "alan": "a%d" % (i % 7)} for i in range(n)]
+        K = [["n%04d" % i, "n%04d" % ((i * 7 + 1) % n), 1] for i in range(n)]
         t = time.time()
-        v, _ = self.uret(k)
+        p = uret.yerlesim(D, K)
         sure = time.time() - t
-        self.assertEqual(len(v["dugumler"]), 2000)
-        self.assertLess(sure, 120, "2.000 not %.1f sn sürdü" % sure)
-        print("\n    2.000 not: %.1f sn, %d sinaps" % (sure, len(v["kenarlar"])), file=sys.stderr)
+        print("\n    2.000 notun yerleşimi: %.1f sn" % sure, file=sys.stderr)
+        self.assertEqual(len(p), n)
+        self.assertLess(sure, 60, "2.000 notun yerleşimi %.1f sn sürdü" % sure)
+        r = sorted(sum(x * x for x in v) ** .5 for v in p.values())
+        self.assertGreater(r[0], 0.3, "hiçbir not çekirdeğe çökmemeli")
+
+    def test_300_dosya_uctan_uca(self):
+        k = os.path.join(self.d, "buyuk")
+        for i in range(300):
+            yaz(k, "n%03d.md" % i, "---\nalan: a%d\n---\n# Not %d\n\n[[n%03d]] [[n%03d]]\n" % (i % 7, i, (i * 7 + 1) % 300, (i * 13 + 5) % 300))
+        v, _ = self.uret(k)
+        self.assertEqual(len(v["dugumler"]), 300)
         self.tutarli(v)
 
 

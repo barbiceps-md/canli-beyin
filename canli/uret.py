@@ -184,6 +184,22 @@ class Maske:
 
 
 # ---------------------------------------------------------------- yerleşim ----
+KOMSU = 24
+KOMSU_HUCRE = sorted(((dx, dy, dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)),
+                     key=lambda c: abs(c[0]) + abs(c[1]) + abs(c[2]))   # önce kendi hücresi, sonra yakın komşular
+
+
+def _it(p, f, a, b, iki):
+    pa, pb = p[a], p[b]
+    d0, d1, d2 = pa[0] - pb[0], pa[1] - pb[1], pa[2] - pb[2]
+    kuv = 0.0026 / max(0.0025, d0 * d0 + d1 * d1 + d2 * d2)
+    fa = f[a]
+    fa[0] += d0 * kuv; fa[1] += d1 * kuv; fa[2] += d2 * kuv
+    if iki:
+        fb = f[b]
+        fb[0] -= d0 * kuv; fb[1] -= d1 * kuv; fb[2] -= d2 * kuv
+
+
 def yerlesim(dugumler, kenarlar):
     """Tohumlu 3B kuvvet yerleşimi: çekirdek ortada, canlı sayfalar kabukta, arşiv dış halkada; alanlar küme olur.
     Veri değişmedikçe konumlar aynı kalır. Nöronlar (katman 'noron') burada değil, noron_yerlesim'de.
@@ -221,37 +237,39 @@ def yerlesim(dugumler, kenarlar):
     sk = [(a, b) for a, b, _ in kenarlar if a in p and b in p]
     buyuk = len(idler) > 220
     # büyük klasör: alan yönü + tohumlu dağılım zaten kümeyi kurar; kuvvet yalnız yakın komşuyu iter (küçük hücre, az adım)
-    adimlar = 320 if not buyuk else 45
-    HUCRE = 0.14
+    adimlar = 40 if buyuk else 320 if len(idler) <= 120 else 200
+    HUCRE = 0.12
     for adim in range(adimlar):
         soguma = 1.0 - adim / (adimlar * 1.25)
         f = {i: [0.0, 0.0, 0.0] for i in idler}
         if not buyuk:
-            ciftler = ((idler[ai], b) for ai in range(len(idler)) for b in idler[ai + 1:])
+            for ai in range(len(idler)):
+                a = idler[ai]
+                pa, fa = p[a], f[a]
+                for b in idler[ai + 1:]:
+                    pb = p[b]
+                    d0, d1, d2 = pa[0] - pb[0], pa[1] - pb[1], pa[2] - pb[2]
+                    kuv = 0.0026 / max(0.0025, d0 * d0 + d1 * d1 + d2 * d2)
+                    fb = f[b]
+                    fa[0] += d0 * kuv; fa[1] += d1 * kuv; fa[2] += d2 * kuv
+                    fb[0] -= d0 * kuv; fb[1] -= d1 * kuv; fb[2] -= d2 * kuv
         else:
+            # her not yalnız çevresindeki en çok KOMSU notu iter (yoğun alan kümesinde çift sayısı patlamasın)
             izgara = {}
             for i in idler:
                 izgara.setdefault(tuple(int(math.floor(x / HUCRE)) for x in p[i]), []).append(i)
-            def _ciftler():
-                for (hx, hy, hz), uyeler in izgara.items():
-                    for dx in (-1, 0, 1):
-                        for dy in (-1, 0, 1):
-                            for dz in (-1, 0, 1):
-                                diger = izgara.get((hx + dx, hy + dy, hz + dz))
-                                if not diger:
-                                    continue
-                                for a in uyeler:
-                                    for b in diger:
-                                        if a < b:
-                                            yield a, b
-            ciftler = _ciftler()
-        for a, b in ciftler:
-            pa, pb = p[a], p[b]
-            d0, d1, d2 = pa[0] - pb[0], pa[1] - pb[1], pa[2] - pb[2]
-            kuv = 0.0026 / max(0.0025, d0 * d0 + d1 * d1 + d2 * d2)
-            fa, fb = f[a], f[b]
-            fa[0] += d0 * kuv; fa[1] += d1 * kuv; fa[2] += d2 * kuv
-            fb[0] -= d0 * kuv; fb[1] -= d1 * kuv; fb[2] -= d2 * kuv
+            for a in idler:
+                hx, hy, hz = (int(math.floor(x / HUCRE)) for x in p[a])
+                n = 0
+                for dx, dy, dz in KOMSU_HUCRE:
+                    for b in izgara.get((hx + dx, hy + dy, hz + dz), ()):
+                        if b != a:
+                            _it(p, f, a, b, iki=False)
+                            n += 1
+                            if n >= KOMSU:
+                                break
+                    if n >= KOMSU:
+                        break
         for a, b in sk:
             d = [p[b][k] - p[a][k] for k in range(3)]
             uz = math.sqrt(sum(x * x for x in d)) or 1e-6

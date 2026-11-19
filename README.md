@@ -223,7 +223,7 @@ Güvenlik açığı bildirimi: [`SECURITY.md`](SECURITY.md).
 ```bash
 test/tumu.sh                                          # ikisi birden
 bash test/hafiza-testleri.sh                          # çekirdek: 68 test, kendi kum havuzunda (örnek kasayla)
-python -m unittest discover -s test -p "test_*.py"    # üretici: 18 test
+python -m unittest discover -s test -p "test_*.py"    # üretici: 19 test
 ```
 
 Çekirdek takımı gerçek kasana, ayarına ve kayıtlarına dokunmaz; her test bir zamanlar gerçekten yaşanmış bir
