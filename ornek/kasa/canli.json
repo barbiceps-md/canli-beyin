@@ -1,0 +1,45 @@
+{
+  "baslangic": "2026-08-21",
+  "bugun": "2026-11-19",
+  "alanlar": [
+    {
+      "anahtar": "mutfak",
+      "ad": "Mutfak",
+      "renk": "#FF7A98",
+      "gezegen": "mars"
+    },
+    {
+      "anahtar": "bahce",
+      "ad": "Bahçe",
+      "renk": "#A6E36A",
+      "gezegen": "dunya"
+    },
+    {
+      "anahtar": "seyahat",
+      "ad": "Seyahat",
+      "renk": "#52D6C6",
+      "gezegen": "uranus"
+    },
+    {
+      "anahtar": "ev-teknolojisi",
+      "ad": "Ev teknolojisi",
+      "renk": "#78AEFF",
+      "gezegen": "neptun"
+    },
+    {
+      "anahtar": "okuma",
+      "ad": "Okuma",
+      "renk": "#F6DFA4",
+      "gezegen": "saturn"
+    },
+    {
+      "anahtar": "saglik",
+      "ad": "Sağlık",
+      "renk": "#FFB45E",
+      "gezegen": "jupiter"
+    }
+  ],
+  "gizle": [
+    "\\b0?5\\d{2}[ ]?\\d{3}[ ]?\\d{2}[ ]?\\d{2}\\b"
+  ]
+}
